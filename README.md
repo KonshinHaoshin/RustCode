@@ -1,10 +1,4 @@
 完整的网站项目介绍：
-![2fe24bb0a28f6ce9cde5fb3917580aa8](https://github.com/user-attachments/assets/c25661c7-22e0-4c9b-9720-533d9c59e5fe)
-https://lorryjovens-hub.github.io/claude-code-rust-landing/
-![c779d5a453223495ffecf3bfc3e6d18e](https://github.com/user-attachments/assets/5142be22-ae24-4861-b8c7-d9f2d455f0e4)
-https://claudecode-rust.netlify.app/
-<img width="1376" height="1993" alt="1a6b35e245460f14cc8c6e8980c5d5a9" src="https://github.com/user-attachments/assets/3af3dda0-62df-4b3c-b030-ebc6187f499f" />  欢迎进群取源码！
-![1d30c6e0bbe26342cc817ef768be6552](https://github.com/user-attachments/assets/ec45b92c-274a-4643-add9-b05d82d302b8)感谢打赏赞助
 
 # Claude Code Rust 🦀
 
@@ -563,4 +557,13 @@ MIT License - 详见 [LICENSE](LICENSE) 文件
 
 <p align="center">
   <sub>如果这个项目对你有帮助，请给一个 ⭐️ Star 支持一下！</sub>
+
+
+   ![2fe24bb0a28f6ce9cde5fb3917580aa8](https://github.com/user-attachments/assets/c25661c7-22e0-4c9b-9720-533d9c59e5fe)
+https://lorryjovens-hub.github.io/claude-code-rust-landing/
+![c779d5a453223495ffecf3bfc3e6d18e](https://github.com/user-attachments/assets/5142be22-ae24-4861-b8c7-d9f2d455f0e4)
+https://claudecode-rust.netlify.app/
+<img width="1376" height="1993" alt="1a6b35e245460f14cc8c6e8980c5d5a9" src="https://github.com/user-attachments/assets/3af3dda0-62df-4b3c-b030-ebc6187f499f" />  欢迎进群取源码！
+![1d30c6e0bbe26342cc817ef768be6552](https://github.com/user-attachments/assets/ec45b92c-274a-4643-add9-b05d82d302b8)感谢打赏赞助
+
 </p>
