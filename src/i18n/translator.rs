@@ -12,7 +12,9 @@ pub struct Translator {
 impl Translator {
     /// Create a new translator with the specified language
     pub fn new(lang_code: &str) -> anyhow::Result<Self> {
-        let language = lang_code.parse::<Language>()?;
+        let language = lang_code
+            .parse::<Language>()
+            .map_err(anyhow::Error::msg)?;
         let current_locale = locales::load_locale(language)?;
         let fallback_locale = locales::load_locale(Language::English)?;
 
@@ -35,7 +37,9 @@ impl Translator {
 
     /// Change the current language
     pub fn set_language(&mut self, lang_code: &str) -> anyhow::Result<()> {
-        let language = lang_code.parse::<Language>()?;
+        let language = lang_code
+            .parse::<Language>()
+            .map_err(anyhow::Error::msg)?;
         self.current_locale = locales::load_locale(language)?;
         self.current_language = language;
         Ok(())

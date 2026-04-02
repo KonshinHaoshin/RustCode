@@ -114,10 +114,10 @@ impl ChatPanel {
     }
 
     fn render_message(&self, ui: &mut Ui, message: &ChatMessage, theme: &super::Theme) {
-        let (bg_color, text_color, align) = match message.role {
-            MessageRole::User => (theme.primary_color(), Color32::WHITE, egui::Align::RIGHT),
-            MessageRole::Assistant => (theme.surface_color(), theme.text_color(), egui::Align::LEFT),
-            MessageRole::System => (theme.background_color(), theme.muted_text_color(), egui::Align::CENTER),
+        let (bg_color, text_color) = match message.role {
+            MessageRole::User => (theme.primary_color(), Color32::WHITE),
+            MessageRole::Assistant => (theme.surface_color(), theme.text_color()),
+            MessageRole::System => (theme.background_color(), theme.muted_text_color()),
         };
 
         let is_user = message.role == MessageRole::User;

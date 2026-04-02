@@ -1,7 +1,7 @@
 //! Main Application - GUI Application State and Logic
 
 use eframe::Frame;
-use egui::{CentralPanel, Context, SidePanel, TopBottomPanel, Vec2};
+use egui::{CentralPanel, Context, SidePanel, TopBottomPanel};
 
 use super::{chat::ChatPanel, sidebar::{Sidebar, Tab}, settings::SettingsPanel, Theme};
 
@@ -40,14 +40,16 @@ impl ClaudeCodeApp {
         app.theme.apply(&cc.egui_ctx);
         
         // Load custom fonts if needed
-        // Self::configure_fonts(&cc.egui_ctx);
+        Self::configure_fonts(&cc.egui_ctx);
+
+        app.show_status("Ready");
         
         app
     }
 
     /// Configure custom fonts
     fn configure_fonts(ctx: &Context) {
-        let mut fonts = egui::FontDefinitions::default();
+        let fonts = egui::FontDefinitions::default();
         
         // Add custom fonts here if needed
         // fonts.font_data.insert("my_font".to_owned(), ...);
@@ -82,7 +84,7 @@ impl eframe::App for ClaudeCodeApp {
 
         // Top panel - Title bar
         TopBottomPanel::top("top_panel")
-            .height(48.0)
+            .exact_height(48.0)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     // Title
@@ -178,7 +180,7 @@ impl eframe::App for ClaudeCodeApp {
 
         // Bottom panel - Status bar
         TopBottomPanel::bottom("bottom_panel")
-            .height(28.0)
+            .exact_height(28.0)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     // Status message
@@ -217,7 +219,7 @@ impl eframe::App for ClaudeCodeApp {
             });
     }
 
-    fn on_exit(&mut self, _ctx: Option<&Context>) {
+    fn on_exit(&mut self, _ctx: Option<&eframe::glow::Context>) {
         // Save app state before exit
         // In a real implementation, save to disk
     }

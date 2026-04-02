@@ -1,6 +1,6 @@
 //! Theme System - Customizable UI themes
 
-use egui::{Color32, Style, Visuals, FontFamily, FontId, TextStyle};
+use egui::{Color32, FontFamily, FontId, TextStyle, Visuals};
 
 /// Application theme
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
