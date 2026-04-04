@@ -47,58 +47,36 @@ impl TerminalTheme {
     pub fn welcome_lines(self, width: u16) -> Vec<Line<'static>> {
         let full = [
             Line::from(vec![
-                Span::styled("Welcome to RustCode ", self.title_style()),
+                Span::styled("RustCode + Ferris ", self.title_style()),
                 Span::styled(
                     format!("v{}", env!("CARGO_PKG_VERSION")),
                     self.muted_style(),
                 ),
             ]),
             Line::from(Span::styled(
-                "..........................................................",
+                "A Rust-native coding assistant with first-run onboarding.",
                 Style::default().fg(self.muted),
             )),
             Line::from(Span::styled(
-                "      *                                        █████▓▓░     ",
-                Style::default().fg(self.muted),
+                "        _~^~^~_",
+                Style::default().fg(self.accent),
             )),
             Line::from(Span::styled(
-                "            ░░░░░░                         ███▓░            ",
+                "    \\) /  o o  \\ (/",
+                Style::default().fg(self.brand),
+            )),
+            Line::from(Span::styled(
+                "      '_   -   _'",
+                Style::default().fg(self.brand),
+            )),
+            Line::from(Span::styled(
+                "      / '-----' \\",
+                Style::default().fg(self.accent),
+            )),
+            Line::from(Span::styled(
+                "Chat below. Tab opens config. Ctrl+C twice exits.",
                 Style::default().fg(self.muted),
             )),
-            Line::from(vec![
-                Span::styled("      ", Style::default()),
-                Span::styled(
-                    "█████████",
-                    Style::default()
-                        .fg(self.accent)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    "     *                                   ",
-                    Style::default().fg(self.muted),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled("      ", Style::default()),
-                Span::styled(
-                    "██▄█████▄██",
-                    Style::default().fg(self.brand).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    "                        *                ",
-                    Style::default().fg(self.muted),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled("      ", Style::default()),
-                Span::styled(
-                    "█████████",
-                    Style::default()
-                        .fg(self.accent)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("                                       ", Style::default()),
-            ]),
         ];
 
         if width >= 72 {
@@ -106,14 +84,18 @@ impl TerminalTheme {
         } else {
             vec![
                 Line::from(vec![
-                    Span::styled("Welcome to RustCode ", self.title_style()),
+                    Span::styled("RustCode ", self.title_style()),
                     Span::styled(
                         format!("v{}", env!("CARGO_PKG_VERSION")),
                         self.muted_style(),
                     ),
                 ]),
                 Line::from(Span::styled(
-                    "Multi-provider coding assistant with fallback-aware setup.",
+                    "  _~^~^~_   Rust-native coding assistant",
+                    Style::default().fg(self.accent),
+                )),
+                Line::from(Span::styled(
+                    " \\) / o o \\ (/  Tab opens config",
                     self.muted_style(),
                 )),
             ]

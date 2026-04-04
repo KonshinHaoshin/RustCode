@@ -11,7 +11,7 @@ use crate::{
     onboarding::OnboardingDraft,
 };
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -20,7 +20,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{List, ListItem, Paragraph, Wrap},
+    widgets::Paragraph,
     Terminal,
 };
 use std::{
@@ -83,7 +83,7 @@ impl TerminalApp {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(7),
+                    Constraint::Length(if frame.size().width >= 72 { 9 } else { 5 }),
                     Constraint::Min(10),
                     Constraint::Length(4),
                 ])
@@ -91,7 +91,7 @@ impl TerminalApp {
 
             let header = Paragraph::new(theme.welcome_lines(chunks[0].width))
                 .block(theme.bordered_block().title(" RustCode "))
-                .wrap(Wrap { trim: false });
+                .wrap(ratatui::widgets::Wrap { trim: false });
             frame.render_widget(header, chunks[0]);
 
             match state.view {
@@ -99,24 +99,11 @@ impl TerminalApp {
                 ViewMode::Chat => render_chat(frame, chunks[1], theme, state),
             }
 
-            let footer = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
-                .split(chunks[2]);
-
             frame.render_widget(
                 Paragraph::new(state.status.as_str())
+                    .alignment(Alignment::Left)
                     .block(theme.bordered_block().title(" Status ")),
-                footer[0],
-            );
-            frame.render_widget(
-                Paragraph::new(match state.view {
-                    ViewMode::Chat => "Enter send | Shift+Enter newline | Tab config",
-                    ViewMode::Onboarding => "Tab move | Left/Right toggle | Enter confirm",
-                })
-                .alignment(Alignment::Center)
-                .block(theme.bordered_block().title(" Keys ")),
-                footer[1],
+                chunks[2],
             );
         })?;
 
@@ -125,6 +112,10 @@ impl TerminalApp {
 
     fn handle_event(&mut self, event: Event) -> anyhow::Result<()> {
         if let Event::Key(key) = event {
+            if key.kind != KeyEventKind::Press {
+                return Ok(());
+            }
+
             if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                 self.state.request_exit();
                 return Ok(());
@@ -532,7 +523,7 @@ fn render_onboarding(
     frame.render_widget(
         Paragraph::new(lines)
             .block(theme.bordered_block().title(" Onboarding "))
-            .wrap(Wrap { trim: false }),
+            .wrap(ratatui::widgets::Wrap { trim: false }),
         area,
     );
 }
@@ -548,37 +539,11 @@ fn render_chat(
         .constraints([Constraint::Min(8), Constraint::Length(6)])
         .split(area);
 
-    let items: Vec<ListItem<'_>> = state
-        .messages
-        .iter()
-        .rev()
-        .take((chunks[0].height.saturating_sub(2) as usize).max(3))
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .map(|message| {
-            let (label, color) = match message.role {
-                DisplayRole::User => ("You", theme.accent),
-                DisplayRole::Assistant => ("RustCode", theme.brand),
-                DisplayRole::System => ("System", theme.muted),
-            };
-
-            ListItem::new(vec![
-                Line::from(Span::styled(
-                    label,
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
-                )),
-                Line::from(Span::styled(
-                    message.content.clone(),
-                    Style::default().fg(theme.text),
-                )),
-                Line::default(),
-            ])
-        })
-        .collect();
-
+    let transcript = render_chat_lines(state, theme);
     frame.render_widget(
-        List::new(items).block(theme.bordered_block().title(" Conversation ")),
+        Paragraph::new(transcript)
+            .block(theme.bordered_block().title(" Conversation "))
+            .wrap(ratatui::widgets::Wrap { trim: false }),
         chunks[0],
     );
     frame.render_widget(
@@ -588,9 +553,41 @@ fn render_chat(
             } else {
                 " Input "
             }))
-            .wrap(Wrap { trim: false }),
+            .wrap(ratatui::widgets::Wrap { trim: false }),
         chunks[1],
     );
+}
+
+fn render_chat_lines(state: &TerminalState, theme: TerminalTheme) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+
+    for message in &state.messages {
+        let (label, color) = match message.role {
+            DisplayRole::User => ("You", theme.accent),
+            DisplayRole::Assistant => ("FerrisCode", theme.brand),
+            DisplayRole::System => ("System", theme.muted),
+        };
+
+        lines.push(Line::from(Span::styled(
+            label,
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        )));
+
+        for content_line in message.content.lines() {
+            lines.push(Line::from(Span::styled(
+                content_line.to_string(),
+                Style::default().fg(theme.text),
+            )));
+        }
+
+        if message.content.is_empty() {
+            lines.push(Line::from(""));
+        }
+
+        lines.push(Line::default());
+    }
+
+    lines
 }
 
 fn render_primary_line(

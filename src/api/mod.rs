@@ -179,10 +179,7 @@ impl ApiClient {
             temperature: 0.7,
         };
 
-        let url = format!(
-            "{}/v1/chat/completions",
-            target.base_url.trim_end_matches('/')
-        );
+        let url = build_api_url(&target.base_url, "/v1/chat/completions");
         let mut builder = self
             .http_client
             .post(url)
@@ -210,7 +207,7 @@ impl ApiClient {
             stream,
         };
 
-        let url = format!("{}/v1/messages", target.base_url.trim_end_matches('/'));
+        let url = build_api_url(&target.base_url, "/v1/messages");
         let mut builder = self
             .http_client
             .post(url)
@@ -467,3 +464,73 @@ pub struct Delta {
 }
 
 pub type AnthropicClient = ApiClient;
+
+fn build_api_url(base_url: &str, endpoint_path: &str) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+
+    if trimmed.ends_with(endpoint_path) {
+        return trimmed.to_string();
+    }
+
+    match endpoint_path {
+        "/v1/chat/completions" => {
+            if trimmed.ends_with("/chat/completions") {
+                return trimmed.to_string();
+            }
+            if trimmed.ends_with("/v1") {
+                return format!("{}/chat/completions", trimmed);
+            }
+        }
+        "/v1/messages" => {
+            if trimmed.ends_with("/messages") {
+                return trimmed.to_string();
+            }
+            if trimmed.ends_with("/v1") {
+                return format!("{}/messages", trimmed);
+            }
+        }
+        _ => {}
+    }
+
+    format!("{}{}", trimmed, endpoint_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_api_url;
+
+    #[test]
+    fn openai_url_uses_root_base_url() {
+        assert_eq!(
+            build_api_url("https://example.com", "/v1/chat/completions"),
+            "https://example.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn openai_url_does_not_duplicate_v1() {
+        assert_eq!(
+            build_api_url("https://example.com/v1", "/v1/chat/completions"),
+            "https://example.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn openai_url_accepts_full_endpoint() {
+        assert_eq!(
+            build_api_url(
+                "https://example.com/v1/chat/completions",
+                "/v1/chat/completions"
+            ),
+            "https://example.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn anthropic_url_does_not_duplicate_v1() {
+        assert_eq!(
+            build_api_url("https://example.com/v1", "/v1/messages"),
+            "https://example.com/v1/messages"
+        );
+    }
+}
