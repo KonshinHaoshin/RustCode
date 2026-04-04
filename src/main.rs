@@ -1,9 +1,9 @@
-//! Claude Code Rust - Main Entry Point
+//! RustCode - Main Entry Point
 
 use clap::Parser;
-use claude_code_rs::cli::Cli;
-use claude_code_rs::config::Settings;
-use claude_code_rs::state::AppState;
+use rustcode::cli::Cli;
+use rustcode::config::Settings;
+use rustcode::state::AppState;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]

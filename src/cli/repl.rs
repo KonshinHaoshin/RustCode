@@ -60,7 +60,7 @@ impl Repl {
     fn print_welcome(&self) {
         println!();
         println!("╔═══════════════════════════════════════════════════════════╗");
-        println!("║         🟢 Claude Code Rust - 重构高性能版本             ║");
+        println!("║           🔵 RustCode - 蓝色高性能编码助手              ║");
         println!("╚═══════════════════════════════════════════════════════════╝");
         println!();
         println!("  🚀 性能优势:");
@@ -69,6 +69,7 @@ impl Repl {
         println!("  • 响应速度提升 40%");
         println!("  • 资源利用率优化 70%");
         println!();
+        println!("  Provider: {}", self.state.settings.api.provider_label());
         println!("  模型: {}", self.state.settings.model);
         println!("  输入 'help' 查看帮助, 'exit' 退出");
         println!();
@@ -77,17 +78,6 @@ impl Repl {
     fn process_input(&mut self, input: &str) -> anyhow::Result<()> {
         let client = ApiClient::new(self.state.settings.clone());
 
-        let api_key = match client.get_api_key() {
-            Some(key) => key,
-            None => {
-                println!("\n❌ 错误: 未配置 API 密钥");
-                println!("请设置环境变量或运行以下命令:");
-                println!("  claude-code config set api_key \"your-api-key\"");
-                println!("  claude-code config set base_url \"https://api.deepseek.com\"");
-                return Ok(());
-            }
-        };
-
         self.conversation_history.push(ChatMessage::user(input));
 
         println!();
@@ -95,60 +85,30 @@ impl Repl {
         io::stdout().flush()?;
 
         let messages = self.conversation_history.clone();
-        let base_url = client.get_base_url();
-        let model = client.get_model().to_string();
-        let max_tokens = self.state.settings.api.max_tokens;
-
-        let request_body = serde_json::json!({
-            "model": model,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "stream": false,
-            "temperature": 0.7
+        let response = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(client.chat(messages))
         });
 
-        let http_client = reqwest::blocking::Client::new();
-        let url = format!("{}/v1/chat/completions", base_url);
-
-        let response = http_client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", api_key))
-            .header("Content-Type", "application/json")
-            .json(&request_body)
-            .send();
-
         match response {
-            Ok(resp) => {
-                if !resp.status().is_success() {
-                    let status = resp.status();
-                    let body = resp.text().unwrap_or_default();
-                    println!("API 错误 ({}): {}", status, body);
-                    return Ok(());
-                }
-
-                let json: serde_json::Value = resp.json().unwrap_or(serde_json::json!({}));
-
-                if let Some(choices) = json.get("choices").and_then(|c| c.as_array()) {
-                    if let Some(choice) = choices.first() {
-                        if let Some(content) = choice.get("message").and_then(|m| m.get("content")).and_then(|c| c.as_str()) {
-                            println!("{}", content);
-                            println!();
-                            self.conversation_history.push(ChatMessage::assistant(content.to_string()));
-                        }
+            Ok(response) => {
+                if let Some(choice) = response.choices.first() {
+                    if !choice.message.content.is_empty() {
+                        println!("{}", choice.message.content);
+                        println!();
+                        self.conversation_history
+                            .push(ChatMessage::assistant(choice.message.content.clone()));
                     }
                 }
 
-                if let Some(usage) = json.get("usage") {
-                    if let (Some(prompt), Some(completion)) = (
-                        usage.get("prompt_tokens").and_then(|t| t.as_u64()),
-                        usage.get("completion_tokens").and_then(|t| t.as_u64()),
-                    ) {
-                        println!("📊 Tokens: {} 提示 + {} 生成 = {} 总计", prompt, completion, prompt + completion);
-                    }
+                if let Some(usage) = response.usage {
+                    println!(
+                        "📊 Tokens: {} 提示 + {} 生成 = {} 总计",
+                        usage.prompt_tokens, usage.completion_tokens, usage.total_tokens
+                    );
                 }
             }
-            Err(e) => {
-                println!("请求失败: {}", e);
+            Err(error) => {
+                println!("请求失败: {}", error);
             }
         }
 
@@ -173,13 +133,38 @@ impl Repl {
     fn print_status(&self) {
         println!();
         println!("📊 当前状态:");
+        println!("  Provider: {}", self.state.settings.api.provider_label());
         println!("  模型: {}", self.state.settings.model);
-        println!("  API 地址: {}", self.state.settings.api.base_url);
+        println!("  协议: {}", self.state.settings.api.protocol().as_str());
+        println!("  API 地址: {}", self.state.settings.api.get_base_url());
         println!("  最大 Tokens: {}", self.state.settings.api.max_tokens);
         println!("  超时: {} 秒", self.state.settings.api.timeout);
-        println!("  流式输出: {}", if self.state.settings.api.streaming { "开启" } else { "关闭" });
+        println!(
+            "  流式输出: {}",
+            if self.state.settings.api.streaming {
+                "开启"
+            } else {
+                "关闭"
+            }
+        );
         println!("  对话消息数: {}", self.conversation_history.len());
-        println!("  API 密钥: {}", if self.state.settings.api.get_api_key().is_some() { "已设置 ✓" } else { "未设置 ✗" });
+        println!(
+            "  API 密钥: {}",
+            if self.state.settings.api.get_api_key().is_some() {
+                "已设置 ✓"
+            } else {
+                "未设置 ✗"
+            }
+        );
+        println!(
+            "  Fallback: {} ({} targets)",
+            if self.state.settings.api.fallback.enabled {
+                "开启"
+            } else {
+                "关闭"
+            },
+            self.state.settings.api.fallback.chain.len()
+        );
         println!();
     }
 
@@ -206,7 +191,10 @@ impl Repl {
     fn print_config(&self) {
         println!();
         println!("⚙️ 配置信息:");
-        println!("{}", serde_json::to_string_pretty(&self.state.settings).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&self.state.settings).unwrap_or_default()
+        );
         println!();
     }
 

@@ -1,10 +1,10 @@
 [package]
-name = "claude_code_rs"
+name = "rustcode"
 version = "0.1.0"
 edition = "2021"
-description = "High-performance Rust implementation of Claude Code CLI"
+description = "fork自https://github.com/lorryjovens-hub/claude-code-rust开始重构的rustcode"
 license = "MIT"
-repository = "https://github.com/lorryjovens-hub/claude-code-rust"
+repository = "https://github.com/KonshinHaoshin/claude-code-rust"
 
 [dependencies]
 # CLI
@@ -121,15 +121,15 @@ i18n = ["fluent", "fluent-bundle", "unic-langid", "rust-embed"]
 full = ["wasm", "gui-egui", "web", "i18n"]
 
 [[bin]]
-name = "claude-code"
+name = "rustcode"
 path = "src/main.rs"
 
 [[bin]]
-name = "claude-code-gui"
+name = "rustcode-gui"
 path = "src/gui/main.rs"
 required-features = ["gui-egui"]
 
 [[bin]]
-name = "claude-code-web"
+name = "rustcode-web"
 path = "src/web/main.rs"
 required-features = ["web"]

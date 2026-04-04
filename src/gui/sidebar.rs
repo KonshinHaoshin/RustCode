@@ -33,14 +33,12 @@ impl Default for Sidebar {
             selected_tab: Tab::Chat,
             collapsed: false,
             width: 260.0,
-            conversations: vec![
-                ConversationItem {
-                    id: "1".to_string(),
-                    title: "New Conversation".to_string(),
-                    timestamp: chrono::Utc::now(),
-                    message_count: 0,
-                },
-            ],
+            conversations: vec![ConversationItem {
+                id: "1".to_string(),
+                title: "New Conversation".to_string(),
+                timestamp: chrono::Utc::now(),
+                message_count: 0,
+            }],
         }
     }
 }
@@ -65,14 +63,19 @@ impl Sidebar {
                         // Header with collapse button
                         ui.horizontal(|ui| {
                             if !self.collapsed {
-                                ui.heading(RichText::new("Claude Code")
-                                    .color(theme.primary_color())
-                                    .size(18.0));
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if ui.button("◀").clicked() {
-                                        self.collapsed = true;
-                                    }
-                                });
+                                ui.heading(
+                                    RichText::new("RustCode")
+                                        .color(theme.primary_color())
+                                        .size(18.0),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui.button("◀").clicked() {
+                                            self.collapsed = true;
+                                        }
+                                    },
+                                );
                             } else {
                                 if ui.button("▶").clicked() {
                                     self.collapsed = false;
@@ -111,7 +114,11 @@ impl Sidebar {
             for (tab, icon, _tooltip) in tabs {
                 let is_selected = self.selected_tab == tab;
                 let button = egui::Button::new(RichText::new(icon).size(20.0))
-                    .fill(if is_selected { theme.primary_color() } else { theme.surface_color() })
+                    .fill(if is_selected {
+                        theme.primary_color()
+                    } else {
+                        theme.surface_color()
+                    })
                     .min_size(Vec2::new(40.0, 40.0))
                     .rounding(8.0);
 
@@ -128,7 +135,7 @@ impl Sidebar {
         let new_chat_button = egui::Button::new(
             RichText::new("➕ New Conversation")
                 .strong()
-                .color(Color32::WHITE)
+                .color(Color32::WHITE),
         )
         .fill(theme.primary_color())
         .min_size(Vec2::new(ui.available_width(), 40.0))
@@ -176,13 +183,11 @@ impl Sidebar {
         ui.add_space(8.0);
 
         // Settings button at bottom
-        let settings_button = egui::Button::new(
-            RichText::new("⚙️ Settings")
-                .color(theme.text_color())
-        )
-        .fill(theme.surface_color())
-        .min_size(Vec2::new(ui.available_width(), 36.0))
-        .rounding(8.0);
+        let settings_button =
+            egui::Button::new(RichText::new("⚙️ Settings").color(theme.text_color()))
+                .fill(theme.surface_color())
+                .min_size(Vec2::new(ui.available_width(), 36.0))
+                .rounding(8.0);
 
         if ui.add(settings_button).clicked() {
             self.selected_tab = Tab::Settings;
@@ -190,10 +195,12 @@ impl Sidebar {
     }
 
     fn render_conversations_list(&mut self, ui: &mut Ui, theme: &super::Theme) {
-        ui.label(RichText::new("Conversations")
-            .strong()
-            .color(theme.muted_text_color())
-            .size(12.0));
+        ui.label(
+            RichText::new("Conversations")
+                .strong()
+                .color(theme.muted_text_color())
+                .size(12.0),
+        );
         ui.add_space(8.0);
 
         egui::ScrollArea::vertical()
@@ -205,10 +212,14 @@ impl Sidebar {
             });
     }
 
-    fn render_conversation_item(&self, ui: &mut Ui, conversation: &ConversationItem, theme: &super::Theme) {
+    fn render_conversation_item(
+        &self,
+        ui: &mut Ui,
+        conversation: &ConversationItem,
+        theme: &super::Theme,
+    ) {
         let button = egui::Button::new(
-            RichText::new(format!("💬 {}", conversation.title))
-                .color(theme.text_color())
+            RichText::new(format!("💬 {}", conversation.title)).color(theme.text_color()),
         )
         .fill(theme.background_color())
         .min_size(Vec2::new(ui.available_width(), 48.0))
@@ -219,27 +230,23 @@ impl Sidebar {
     }
 
     fn render_history(&mut self, ui: &mut Ui, theme: &super::Theme) {
-        ui.label(RichText::new("History")
-            .strong()
-            .color(theme.muted_text_color())
-            .size(12.0));
+        ui.label(
+            RichText::new("History")
+                .strong()
+                .color(theme.muted_text_color())
+                .size(12.0),
+        );
         ui.add_space(8.0);
 
         // Placeholder history items
-        let history_items = vec![
-            "Yesterday",
-            "Last Week",
-            "Last Month",
-        ];
+        let history_items = vec!["Yesterday", "Last Week", "Last Month"];
 
         for item in history_items {
-            let button = egui::Button::new(
-                RichText::new(format!("📅 {}", item))
-                    .color(theme.text_color())
-            )
-            .fill(theme.background_color())
-            .min_size(Vec2::new(ui.available_width(), 40.0))
-            .rounding(8.0);
+            let button =
+                egui::Button::new(RichText::new(format!("📅 {}", item)).color(theme.text_color()))
+                    .fill(theme.background_color())
+                    .min_size(Vec2::new(ui.available_width(), 40.0))
+                    .rounding(8.0);
 
             ui.add(button);
             ui.add_space(4.0);
@@ -247,10 +254,12 @@ impl Sidebar {
     }
 
     fn render_plugins(&mut self, ui: &mut Ui, theme: &super::Theme) {
-        ui.label(RichText::new("Plugins")
-            .strong()
-            .color(theme.muted_text_color())
-            .size(12.0));
+        ui.label(
+            RichText::new("Plugins")
+                .strong()
+                .color(theme.muted_text_color())
+                .size(12.0),
+        );
         ui.add_space(8.0);
 
         // Placeholder plugin items
@@ -261,10 +270,10 @@ impl Sidebar {
         ];
 
         for (name, status) in plugins {
-            let color = if status == "Enabled" { 
-                theme.success_color() 
-            } else { 
-                theme.muted_text_color() 
+            let color = if status == "Enabled" {
+                theme.success_color()
+            } else {
+                theme.muted_text_color()
             };
 
             ui.horizontal(|ui| {
@@ -283,10 +292,12 @@ impl Sidebar {
     }
 
     fn render_tools(&mut self, ui: &mut Ui, theme: &super::Theme) {
-        ui.label(RichText::new("Tools")
-            .strong()
-            .color(theme.muted_text_color())
-            .size(12.0));
+        ui.label(
+            RichText::new("Tools")
+                .strong()
+                .color(theme.muted_text_color())
+                .size(12.0),
+        );
         ui.add_space(8.0);
 
         let tools = vec![
@@ -297,12 +308,10 @@ impl Sidebar {
         ];
 
         for tool in tools {
-            let button = egui::Button::new(
-                RichText::new(tool).color(theme.text_color())
-            )
-            .fill(theme.background_color())
-            .min_size(Vec2::new(ui.available_width(), 36.0))
-            .rounding(8.0);
+            let button = egui::Button::new(RichText::new(tool).color(theme.text_color()))
+                .fill(theme.background_color())
+                .min_size(Vec2::new(ui.available_width(), 36.0))
+                .rounding(8.0);
 
             ui.add(button);
             ui.add_space(4.0);
@@ -310,10 +319,12 @@ impl Sidebar {
     }
 
     fn render_settings_link(&mut self, ui: &mut Ui, theme: &super::Theme) {
-        ui.label(RichText::new("Quick Settings")
-            .strong()
-            .color(theme.muted_text_color())
-            .size(12.0));
+        ui.label(
+            RichText::new("Quick Settings")
+                .strong()
+                .color(theme.muted_text_color())
+                .size(12.0),
+        );
         ui.add_space(8.0);
 
         let settings = vec![
@@ -324,12 +335,10 @@ impl Sidebar {
         ];
 
         for setting in settings {
-            let button = egui::Button::new(
-                RichText::new(setting).color(theme.text_color())
-            )
-            .fill(theme.background_color())
-            .min_size(Vec2::new(ui.available_width(), 36.0))
-            .rounding(8.0);
+            let button = egui::Button::new(RichText::new(setting).color(theme.text_color()))
+                .fill(theme.background_color())
+                .min_size(Vec2::new(ui.available_width(), 36.0))
+                .rounding(8.0);
 
             ui.add(button);
             ui.add_space(4.0);
