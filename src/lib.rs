@@ -1,6 +1,6 @@
-//! Claude Code Rust - High-performance CLI for Claude AI
+//! RustCode - High-performance multi-provider coding CLI
 //!
-//! A complete Rust implementation of Claude Code, featuring:
+//! A native Rust coding assistant, featuring:
 //! - Async-first architecture with Tokio
 //! - Native terminal UI with Ratatui
 //! - MCP protocol support
@@ -15,48 +15,50 @@
 //! - Plugin marketplace web interface
 //! - Multi-language i18n support
 
-pub mod cli;
-pub mod tools;
+pub mod advanced;
 pub mod api;
+pub mod cli;
 pub mod config;
-pub mod state;
 pub mod mcp;
-pub mod voice;
 pub mod memory;
+pub mod onboarding;
 pub mod plugins;
-pub mod utils;
 pub mod services;
 pub mod session;
+pub mod state;
 pub mod terminal;
-pub mod advanced;
+pub mod tools;
+pub mod utils;
+pub mod voice;
 
 // Feature-gated modules
-#[cfg(feature = "wasm")]
-pub mod wasm;
 #[cfg(feature = "gui-egui")]
 pub mod gui;
-#[cfg(feature = "web")]
-pub mod web;
 #[cfg(feature = "i18n")]
 pub mod i18n;
+#[cfg(feature = "wasm")]
+pub mod wasm;
+#[cfg(feature = "web")]
+pub mod web;
 
+pub use advanced::{ProjectInitializer, RemoteExecutor, SshClient};
+pub use api::{AnthropicClient, ApiClient, ChatMessage};
 pub use cli::Cli;
-pub use state::AppState;
-pub use tools::ToolRegistry;
-pub use api::{ApiClient, AnthropicClient, ChatMessage};
 pub use config::Settings;
 pub use mcp::McpManager;
-pub use voice::VoiceInput;
 pub use memory::MemoryManager;
+pub use onboarding::OnboardingDraft;
 pub use plugins::PluginManager;
-pub use advanced::{SshClient, RemoteExecutor, ProjectInitializer};
+pub use state::AppState;
+pub use tools::ToolRegistry;
+pub use voice::VoiceInput;
 
 // Feature-gated re-exports
-#[cfg(feature = "wasm")]
-pub use wasm::ClaudeCodeWasm;
 #[cfg(feature = "gui-egui")]
-pub use gui::ClaudeCodeApp;
-#[cfg(feature = "web")]
-pub use web::WebServer;
+pub use gui::RustCodeApp;
 #[cfg(feature = "i18n")]
 pub use i18n::Translator;
+#[cfg(feature = "wasm")]
+pub use wasm::ClaudeCodeWasm;
+#[cfg(feature = "web")]
+pub use web::WebServer;

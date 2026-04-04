@@ -9,7 +9,7 @@ pub type Cli = CliArgs;
 impl Cli {
     pub async fn run_async(&self, state: crate::state::AppState) -> anyhow::Result<()> {
         if self.version {
-            println!("claude-code-rust {}", env!("CARGO_PKG_VERSION"));
+            println!("rustcode {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
         }
 
@@ -19,6 +19,9 @@ impl Cli {
         }
 
         match &self.command {
+            Some(super::Commands::Tui { prompt }) => {
+                self.run_tui(state, prompt.clone())?;
+            }
             Some(super::Commands::Repl { prompt }) => {
                 self.run_repl(state, prompt.clone())?;
             }
@@ -61,11 +64,14 @@ impl Cli {
             Some(super::Commands::TeamSync { action }) => {
                 self.run_team_sync(state, action).await?;
             }
-            Some(super::Commands::StressTest { concurrency, iterations }) => {
+            Some(super::Commands::StressTest {
+                concurrency,
+                iterations,
+            }) => {
                 self.run_stress_test(*concurrency, *iterations).await?;
             }
             None => {
-                self.run_repl(state, None)?;
+                self.run_tui(state, None)?;
             }
         }
 
@@ -77,65 +83,40 @@ impl Cli {
         println!("  Version: {}", env!("CARGO_PKG_VERSION"));
         println!("  OS: {}", std::env::consts::OS);
         println!("  Arch: {}", std::env::consts::ARCH);
-        println!("  Working Dir: {}", std::env::current_dir().unwrap().display());
+        println!(
+            "  Working Dir: {}",
+            std::env::current_dir().unwrap().display()
+        );
     }
 
-    fn run_repl(&self, state: crate::state::AppState, prompt: Option<String>) -> anyhow::Result<()> {
+    fn run_repl(
+        &self,
+        mut state: crate::state::AppState,
+        prompt: Option<String>,
+    ) -> anyhow::Result<()> {
+        if state.settings.should_run_onboarding() {
+            crate::cli::onboarding::run_config_onboarding()?;
+            state = crate::state::AppState::new(crate::config::Settings::load()?);
+        }
+
         let mut repl = crate::cli::repl::Repl::new(state);
         repl.start(prompt)?;
         Ok(())
     }
 
+    fn run_tui(&self, state: crate::state::AppState, prompt: Option<String>) -> anyhow::Result<()> {
+        let mut app = crate::terminal::TerminalApp::new(state.settings.clone(), prompt)?;
+        app.run()
+    }
+
     async fn run_query(&self, state: crate::state::AppState, prompt: String) -> anyhow::Result<()> {
         let client = crate::api::ApiClient::new(state.settings.clone());
-        
-        let api_key = match client.get_api_key() {
-            Some(key) => key,
-            None => {
-                eprintln!("Error: API key not configured");
-                eprintln!("Set environment variable DEEPSEEK_API_KEY or run:");
-                eprintln!("  claude-code config set api_key \"your-api-key\"");
-                std::process::exit(1);
-            }
-        };
-
         let messages = vec![crate::api::ChatMessage::user(&prompt)];
-        let base_url = client.get_base_url().to_string();
-        let model = client.get_model().to_string();
-        let max_tokens = state.settings.api.max_tokens;
 
-        let request_body = serde_json::json!({
-            "model": model,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "stream": false,
-            "temperature": 0.7
-        });
-
-        let http_client = reqwest::Client::new();
-        let url = format!("{}/v1/chat/completions", base_url);
-
-        let response = http_client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", api_key))
-            .header("Content-Type", "application/json")
-            .json(&request_body)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("API error ({}): {}", status, body));
-        }
-
-        let json: serde_json::Value = response.json().await?;
-
-        if let Some(choices) = json.get("choices").and_then(|c| c.as_array()) {
-            if let Some(choice) = choices.first() {
-                if let Some(content) = choice.get("message").and_then(|m| m.get("content")).and_then(|c| c.as_str()) {
-                    println!("{}", content);
-                }
+        let response = client.chat(messages).await?;
+        if let Some(choice) = response.choices.first() {
+            if !choice.message.content.is_empty() {
+                println!("{}", choice.message.content);
             }
         }
 
@@ -147,6 +128,9 @@ impl Cli {
             super::ConfigCommands::Show => {
                 let settings = crate::config::Settings::load()?;
                 println!("{}", serde_json::to_string_pretty(&settings)?);
+            }
+            super::ConfigCommands::Onboard => {
+                crate::cli::onboarding::run_config_onboarding()?;
             }
             super::ConfigCommands::Set { key, value } => {
                 crate::config::Settings::set(key, value)?;
@@ -189,7 +173,7 @@ impl Cli {
     async fn run_plugin(&self, action: &super::PluginCommands) -> anyhow::Result<()> {
         let state = Arc::new(RwLock::new(crate::state::AppState::default()));
         let service = crate::services::PluginMarketplaceService::new(state, None);
-        
+
         match action {
             super::PluginCommands::List => {
                 let plugins = service.list_installed().await;
@@ -197,7 +181,11 @@ impl Cli {
                     println!("No plugins installed");
                 } else {
                     for plugin in plugins {
-                        let status = if plugin.enabled { "enabled" } else { "disabled" };
+                        let status = if plugin.enabled {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        };
                         println!("  - {} v{} [{}]", plugin.name, plugin.version, status);
                     }
                 }
@@ -220,8 +208,10 @@ impl Cli {
                     println!("No plugins found for: {}", query);
                 } else {
                     for plugin in results {
-                        println!("  - {} v{} by {} (⭐ {})", 
-                                 plugin.name, plugin.version, plugin.author, plugin.rating);
+                        println!(
+                            "  - {} v{} by {} (⭐ {})",
+                            plugin.name, plugin.version, plugin.author, plugin.rating
+                        );
                         println!("    {}", plugin.description);
                     }
                 }
@@ -241,7 +231,7 @@ impl Cli {
     async fn run_memory(&self, action: &super::MemoryCommands) -> anyhow::Result<()> {
         let manager = crate::memory::MemoryManager::new();
         manager.load().await?;
-        
+
         match action {
             super::MemoryCommands::Status => {
                 let status = manager.status().await?;
@@ -278,10 +268,14 @@ impl Cli {
         Ok(())
     }
 
-    async fn run_voice(&self, state: crate::state::AppState, push_to_talk: bool) -> anyhow::Result<()> {
+    async fn run_voice(
+        &self,
+        state: crate::state::AppState,
+        push_to_talk: bool,
+    ) -> anyhow::Result<()> {
         let state = Arc::new(RwLock::new(state));
         let service = crate::services::VoiceService::new(state, None);
-        
+
         let status = service.get_status().await;
         if !status.available {
             println!("Voice input is not available on this system");
@@ -292,12 +286,12 @@ impl Cli {
         if push_to_talk {
             println!("🎤 Push-to-talk mode enabled");
             println!("Press Enter to start recording, press Enter again to stop.");
-            
+
             service.push_to_talk_start().await?;
-            
+
             let mut input = String::new();
             std::io::stdin().read_line(&mut input)?;
-            
+
             let text = service.push_to_talk_stop().await?;
             println!("\n📝 Transcribed: {}", text);
         } else {
@@ -305,12 +299,12 @@ impl Cli {
             println!("Voice input starting...");
             service.start_recording().await?;
         }
-        
+
         Ok(())
     }
 
     fn run_init(&self, name: Option<String>) -> anyhow::Result<()> {
-        let project_name = name.unwrap_or_else(|| "claude-code-project".to_string());
+        let project_name = name.unwrap_or_else(|| "rustcode-project".to_string());
         crate::utils::project::init_project(&project_name)?;
         println!("Initialized project: {}", project_name);
         Ok(())
@@ -330,11 +324,15 @@ impl Cli {
         Ok(())
     }
 
-    async fn run_services(&self, state: crate::state::AppState, action: &super::ServiceCommands) -> anyhow::Result<()> {
+    async fn run_services(
+        &self,
+        state: crate::state::AppState,
+        action: &super::ServiceCommands,
+    ) -> anyhow::Result<()> {
         let state = Arc::new(RwLock::new(state));
         let mut manager = crate::services::ServiceManager::new(state.clone());
         manager.initialize().await?;
-        
+
         match action {
             super::ServiceCommands::Status => {
                 let status = manager.get_status().await;
@@ -410,10 +408,15 @@ impl Cli {
         Ok(())
     }
 
-    async fn run_agent(&self, state: crate::state::AppState, agent_type: &str, prompt: &str) -> anyhow::Result<()> {
+    async fn run_agent(
+        &self,
+        state: crate::state::AppState,
+        agent_type: &str,
+        prompt: &str,
+    ) -> anyhow::Result<()> {
         let state = Arc::new(RwLock::new(state));
         let service = crate::services::AgentsService::new(state);
-        
+
         let agent_type = match agent_type.to_lowercase().as_str() {
             "guide" | "claude-code-guide" => crate::services::AgentType::ClaudeCodeGuide,
             "explore" => crate::services::AgentType::Explore,
@@ -432,7 +435,7 @@ impl Cli {
         println!();
 
         let session = service.run_agent(&agent_type, prompt).await?;
-        
+
         if let Some(result) = &session.result {
             println!("{}", result);
         }
@@ -440,10 +443,14 @@ impl Cli {
         Ok(())
     }
 
-    async fn run_magic_docs(&self, state: crate::state::AppState, action: &super::MagicDocsCommands) -> anyhow::Result<()> {
+    async fn run_magic_docs(
+        &self,
+        state: crate::state::AppState,
+        action: &super::MagicDocsCommands,
+    ) -> anyhow::Result<()> {
         let state = Arc::new(RwLock::new(state));
         let service = crate::services::MagicDocsService::new(state, None);
-        
+
         match action {
             super::MagicDocsCommands::List => {
                 let docs = service.get_tracked_docs().await;
@@ -452,7 +459,10 @@ impl Cli {
                 } else {
                     for doc in docs {
                         println!("  - {} ({})", doc.title, doc.path);
-                        println!("    Updated: {} ({} times)", doc.last_updated, doc.update_count);
+                        println!(
+                            "    Updated: {} ({} times)",
+                            doc.last_updated, doc.update_count
+                        );
                     }
                 }
             }
@@ -468,7 +478,9 @@ impl Cli {
                 }
             }
             super::MagicDocsCommands::Update { file, context } => {
-                let ctx = context.clone().unwrap_or_else(|| "Manual update".to_string());
+                let ctx = context
+                    .clone()
+                    .unwrap_or_else(|| "Manual update".to_string());
                 service.update_magic_doc(file, &ctx).await?;
                 println!("Updated Magic Doc: {}", file);
             }
@@ -480,8 +492,12 @@ impl Cli {
         Ok(())
     }
 
-    async fn run_team_sync(&self, state: crate::state::AppState, action: &super::TeamSyncCommands) -> anyhow::Result<()> {
-        use crate::services::{TeamMemorySyncService, TeamMemoryConfig, ConflictResolution};
+    async fn run_team_sync(
+        &self,
+        state: crate::state::AppState,
+        action: &super::TeamSyncCommands,
+    ) -> anyhow::Result<()> {
+        use crate::services::{ConflictResolution, TeamMemoryConfig, TeamMemorySyncService};
 
         let state = Arc::new(RwLock::new(state));
         let service = TeamMemorySyncService::new(

@@ -2,6 +2,7 @@
 
 pub mod args;
 pub mod commands;
+pub mod onboarding;
 pub mod repl;
 
 pub use args::Cli;
@@ -10,12 +11,12 @@ pub use repl::Repl;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-/// Claude Code - AI-powered coding assistant
+/// RustCode - AI-powered coding assistant
 #[derive(Parser, Debug)]
-#[command(name = "claude-code")]
-#[command(author = "Anthropic")]
+#[command(name = "rustcode")]
+#[command(author = "RustCode Contributors")]
 #[command(version = "0.1.0")]
-#[command(about = "High-performance Rust implementation of Claude Code CLI")]
+#[command(about = "High-performance Rust coding assistant with configurable API providers")]
 #[command(disable_version_flag = true)]
 #[command(disable_help_subcommand = true)]
 pub struct CliArgs {
@@ -23,8 +24,8 @@ pub struct CliArgs {
     #[arg(short, long, value_name = "PATH")]
     pub path: Option<PathBuf>,
 
-    /// Model to use (sonnet, opus, haiku)
-    #[arg(short, long, default_value = "sonnet")]
+    /// Model to use for the selected provider
+    #[arg(short, long, default_value = "deepseek-chat")]
     pub model: String,
 
     /// Enable verbose logging
@@ -50,6 +51,13 @@ pub struct CliArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
+    /// Start the full-screen terminal UI
+    Tui {
+        /// Initial prompt to send after launch
+        #[arg(short, long)]
+        prompt: Option<String>,
+    },
+
     /// Start an interactive REPL session
     Repl {
         /// Initial prompt to send
@@ -163,6 +171,9 @@ pub enum ConfigCommands {
         /// Configuration value
         value: String,
     },
+
+    /// Launch an interactive onboarding flow for model configuration
+    Onboard,
 
     /// Reset configuration to defaults
     Reset,
