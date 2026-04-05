@@ -6,9 +6,9 @@ use super::{
     theme::{TerminalTheme, BLACK_CIRCLE, GUTTER},
 };
 use crate::{
-    api::{ApiClient, ChatMessage},
     config::{ApiProtocol, ApiProvider, FallbackTarget, Settings},
     onboarding::OnboardingDraft,
+    runtime::{QueryEngine, RuntimeMessage},
 };
 use crossterm::{
     event::{
@@ -450,7 +450,7 @@ impl TerminalApp {
         );
         self.state.mark_chat_render_dirty();
 
-        let user_message = ChatMessage::user(prompt);
+        let user_message = RuntimeMessage::user(prompt);
         let base_history = Arc::clone(&self.state.conversation_history);
         self.state.pending_response = Some(PendingChatRequest {
             receiver: spawn_chat_request(
@@ -479,9 +479,6 @@ impl TerminalApp {
                             role: DisplayRole::Assistant,
                             content: content.clone(),
                         });
-                        let mut next_history = (*self.state.conversation_history).clone();
-                        next_history.push(ChatMessage::assistant(content));
-                        self.state.conversation_history = Arc::new(next_history);
                         self.state.status = "Response received.".to_string();
                         self.state.scroll_offset = 0;
                     }
@@ -1046,34 +1043,48 @@ fn fallback_defaults(provider: ApiProvider) -> FallbackTarget {
 
 fn spawn_chat_request(
     settings: Settings,
-    base_history: Arc<Vec<ChatMessage>>,
-    user_message: ChatMessage,
+    base_history: Arc<Vec<RuntimeMessage>>,
+    user_message: RuntimeMessage,
 ) -> mpsc::Receiver<ChatWorkerResult> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
-        let request_history = {
-            let mut history = (*base_history).clone();
-            history.push(user_message);
-            history
-        };
-        let result: anyhow::Result<String> = (|| {
+        let original_user_message = user_message.clone();
+        let payload = (|| -> anyhow::Result<ChatWorkerResult> {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?;
-            runtime.block_on(async {
-                let client = ApiClient::new(settings);
-                let response = client.chat(&request_history).await?;
-                Ok(response
-                    .choices
-                    .first()
-                    .map(|choice| choice.message.content.clone())
-                    .unwrap_or_default())
-            })
-        })();
-        let payload = ChatWorkerResult {
-            history: request_history,
-            result,
-        };
+            let fallback_user_message = user_message.clone();
+            let result = runtime.block_on(async {
+                let engine = QueryEngine::new(settings);
+                engine.submit_message(&base_history, user_message).await
+            });
+
+            match result {
+                Ok(result) => {
+                    let assistant_text = result.assistant_text().unwrap_or_default().to_string();
+                    Ok(ChatWorkerResult {
+                        history: result.history,
+                        result: Ok(assistant_text),
+                    })
+                }
+                Err(error) => {
+                    let mut history = (*base_history).clone();
+                    history.push(fallback_user_message);
+                    Ok(ChatWorkerResult {
+                        history,
+                        result: Err(error),
+                    })
+                }
+            }
+        })()
+        .unwrap_or_else(|error| {
+            let mut history = (*base_history).clone();
+            history.push(original_user_message);
+            ChatWorkerResult {
+                history,
+                result: Err(error),
+            }
+        });
         let _ = sender.send(payload);
     });
     receiver

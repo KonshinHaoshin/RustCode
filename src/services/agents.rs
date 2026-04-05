@@ -285,25 +285,14 @@ Be thorough and systematic. Focus on finding and reporting issues."#.to_string()
 
     async fn execute_agent(&self, agent: &AgentDefinition, prompt: &str) -> anyhow::Result<String> {
         let state = self.state.read().await;
-        let api_client = crate::api::ApiClient::new(state.settings.clone());
+        let engine = crate::runtime::QueryEngine::new(state.settings.clone());
+        let history = vec![crate::runtime::RuntimeMessage::system(
+            agent.system_prompt.clone(),
+        )];
+        let response = engine.submit_text_turn(&history, prompt).await?;
 
-        let messages = vec![
-            crate::api::ChatMessage {
-                role: "system".to_string(),
-                content: agent.system_prompt.clone(),
-                tool_calls: None,
-            },
-            crate::api::ChatMessage {
-                role: "user".to_string(),
-                content: prompt.to_string(),
-                tool_calls: None,
-            },
-        ];
-
-        let response = api_client.chat(&messages).await?;
-
-        if let Some(choice) = response.choices.first() {
-            return Ok(choice.message.content.clone());
+        if let Some(content) = response.assistant_text() {
+            return Ok(content.to_string());
         }
 
         Ok(String::new())

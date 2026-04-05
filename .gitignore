@@ -37,3 +37,6 @@ settings.json
 AGENTS.md
 CLAUDE.md
 .claude/
+plan/
+!plan/
+!plan/*.md

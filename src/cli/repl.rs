@@ -1,12 +1,12 @@
 //! REPL Module - Interactive Read-Eval-Print Loop
 
-use crate::api::{ApiClient, ChatMessage};
+use crate::runtime::{QueryEngine, RuntimeMessage, RuntimeRole};
 use crate::state::AppState;
 use std::io::{self, BufRead, Write};
 
 pub struct Repl {
     state: AppState,
-    conversation_history: Vec<ChatMessage>,
+    conversation_history: Vec<RuntimeMessage>,
 }
 
 impl Repl {
@@ -76,9 +76,7 @@ impl Repl {
     }
 
     fn process_input(&mut self, input: &str) -> anyhow::Result<()> {
-        let client = ApiClient::new(self.state.settings.clone());
-
-        self.conversation_history.push(ChatMessage::user(input));
+        let engine = QueryEngine::new(self.state.settings.clone());
 
         println!();
         print!("🤖 ");
@@ -86,19 +84,19 @@ impl Repl {
 
         let messages = self.conversation_history.clone();
         let response = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(client.chat(&messages))
+            tokio::runtime::Handle::current().block_on(engine.submit_text_turn(&messages, input))
         });
 
         match response {
             Ok(response) => {
-                if let Some(choice) = response.choices.first() {
-                    if !choice.message.content.is_empty() {
-                        println!("{}", choice.message.content);
+                if let Some(content) = response.assistant_text() {
+                    if !content.is_empty() {
+                        println!("{}", content);
                         println!();
-                        self.conversation_history
-                            .push(ChatMessage::assistant(choice.message.content.clone()));
                     }
                 }
+
+                self.conversation_history = response.history;
 
                 if let Some(usage) = response.usage {
                     println!(
@@ -108,6 +106,7 @@ impl Repl {
                 }
             }
             Err(error) => {
+                self.conversation_history.push(RuntimeMessage::user(input));
                 println!("请求失败: {}", error);
             }
         }
@@ -175,10 +174,10 @@ impl Repl {
         } else {
             println!("📜 对话历史 ({} 条消息):", self.conversation_history.len());
             for (i, msg) in self.conversation_history.iter().enumerate() {
-                let role = match msg.role.as_str() {
-                    "user" => "👤 用户",
-                    "assistant" => "🤖 助手",
-                    _ => "❓ 未知",
+                let role = match msg.role {
+                    RuntimeRole::User => "👤 用户",
+                    RuntimeRole::Assistant => "🤖 助手",
+                    RuntimeRole::System => "⚙️ 系统",
                 };
                 let preview: String = msg.content.chars().take(50).collect();
                 let suffix = if msg.content.len() > 50 { "..." } else { "" };

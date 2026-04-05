@@ -1,7 +1,7 @@
 use crate::{
-    api::ChatMessage,
     config::{ApiProvider, FallbackTarget, Settings},
     onboarding::OnboardingDraft,
+    runtime::RuntimeMessage,
     terminal::theme::SPINNER_FRAMES,
 };
 use ratatui::{text::Line, widgets::Paragraph};
@@ -27,15 +27,15 @@ pub struct DisplayMessage {
 
 #[derive(Debug)]
 pub struct ChatWorkerResult {
-    pub history: Vec<ChatMessage>,
+    pub history: Vec<RuntimeMessage>,
     pub result: anyhow::Result<String>,
 }
 
 #[derive(Debug)]
 pub struct PendingChatRequest {
     pub receiver: Receiver<ChatWorkerResult>,
-    pub base_history: Arc<Vec<ChatMessage>>,
-    pub user_message: ChatMessage,
+    pub base_history: Arc<Vec<RuntimeMessage>>,
+    pub user_message: RuntimeMessage,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,7 +88,7 @@ pub struct TerminalState {
     pub should_quit: bool,
     pub confirm_exit_deadline: Option<Instant>,
     pub messages: Vec<DisplayMessage>,
-    pub conversation_history: Arc<Vec<ChatMessage>>,
+    pub conversation_history: Arc<Vec<RuntimeMessage>>,
     pub pending_response: Option<PendingChatRequest>,
     pub thinking: bool,
     pub initial_prompt: Option<String>,

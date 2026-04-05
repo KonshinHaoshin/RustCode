@@ -110,13 +110,11 @@ impl Cli {
     }
 
     async fn run_query(&self, state: crate::state::AppState, prompt: String) -> anyhow::Result<()> {
-        let client = crate::api::ApiClient::new(state.settings.clone());
-        let messages = vec![crate::api::ChatMessage::user(&prompt)];
-
-        let response = client.chat(&messages).await?;
-        if let Some(choice) = response.choices.first() {
-            if !choice.message.content.is_empty() {
-                println!("{}", choice.message.content);
+        let engine = crate::runtime::QueryEngine::new(state.settings.clone());
+        let response = engine.submit_text_turn(&[], prompt).await?;
+        if let Some(content) = response.assistant_text() {
+            if !content.is_empty() {
+                println!("{}", content);
             }
         }
 
