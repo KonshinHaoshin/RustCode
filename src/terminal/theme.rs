@@ -3,25 +3,43 @@ use ratatui::{
     text::{Line, Span},
 };
 
+pub const GUTTER: &str = "⎿";
+pub const BLACK_CIRCLE: &str = "●";
+#[allow(dead_code)]
+pub const DIVIDER_CHAR: char = '─';
+pub const SPINNER_FRAMES: &[char] = &['·', '✢', '✳', '✶', '✻', '✽'];
+
 #[derive(Debug, Clone, Copy)]
 pub struct TerminalTheme {
     pub brand: Color,
-    pub accent: Color,
+    pub shimmer: Color,
     pub text: Color,
     pub muted: Color,
+    pub subtle: Color,
     pub border: Color,
+    #[allow(dead_code)]
     pub panel: Color,
+    pub user_msg_bg: Color,
+    pub success: Color,
+    pub error: Color,
+    #[allow(dead_code)]
+    pub warning: Color,
 }
 
 impl Default for TerminalTheme {
     fn default() -> Self {
         Self {
-            brand: Color::Rgb(222, 119, 55),
-            accent: Color::Rgb(245, 198, 110),
-            text: Color::Rgb(230, 228, 220),
-            muted: Color::Rgb(145, 145, 140),
-            border: Color::Rgb(82, 78, 72),
-            panel: Color::Rgb(28, 29, 31),
+            brand: Color::Rgb(215, 119, 87),
+            shimmer: Color::Rgb(235, 159, 127),
+            text: Color::Rgb(255, 255, 255),
+            muted: Color::Rgb(153, 153, 153),
+            subtle: Color::Rgb(80, 80, 80),
+            border: Color::Rgb(136, 136, 136),
+            panel: Color::Black,
+            user_msg_bg: Color::Rgb(55, 55, 55),
+            success: Color::Rgb(78, 186, 101),
+            error: Color::Rgb(255, 107, 128),
+            warning: Color::Rgb(255, 193, 7),
         }
     }
 }
@@ -35,70 +53,56 @@ impl TerminalTheme {
         Style::default().fg(self.muted)
     }
 
-    pub fn bordered_block(self) -> ratatui::widgets::Block<'static> {
+    pub fn prompt_block(self) -> ratatui::widgets::Block<'static> {
         use ratatui::widgets::{Block, Borders};
 
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(self.border))
-            .style(Style::default().bg(self.panel))
     }
 
-    pub fn welcome_lines(self, width: u16) -> Vec<Line<'static>> {
-        let full = [
+    pub fn welcome_lines(self, _width: u16) -> Vec<Line<'static>> {
+        let brand_style = Style::default().fg(self.brand);
+        let subtle_style = Style::default().fg(self.subtle);
+
+        vec![
+            Line::from(Span::styled("  ▄█████▄  ", brand_style)),
             Line::from(vec![
-                Span::styled("RustCode + Ferris ", self.title_style()),
+                Span::styled(" █▀ ", brand_style),
+                Span::styled("▄▄", subtle_style),
+                Span::styled(" ▀█ ", brand_style),
+            ]),
+            Line::from(Span::styled("  ▀█████▀  ", brand_style)),
+            Line::from(Span::styled("   ╹╹ ╹╹   ", brand_style)),
+            Line::default(),
+            Line::from(vec![
+                Span::styled("Welcome to RustCode ", self.title_style()),
                 Span::styled(
                     format!("v{}", env!("CARGO_PKG_VERSION")),
                     self.muted_style(),
                 ),
             ]),
             Line::from(Span::styled(
-                "A Rust-native coding assistant with first-run onboarding.",
-                Style::default().fg(self.muted),
+                std::env::current_dir()
+                    .ok()
+                    .and_then(|p| p.to_str().map(|s| s.to_string()))
+                    .unwrap_or_else(|| "~".to_string()),
+                self.muted_style(),
             )),
             Line::from(Span::styled(
-                "        _~^~^~_",
-                Style::default().fg(self.accent),
+                "─────────────────────────────────────────",
+                Style::default().fg(self.subtle),
             )),
-            Line::from(Span::styled(
-                "    \\) /  o o  \\ (/",
-                Style::default().fg(self.brand),
-            )),
-            Line::from(Span::styled(
-                "      '_   -   _'",
-                Style::default().fg(self.brand),
-            )),
-            Line::from(Span::styled(
-                "      / '-----' \\",
-                Style::default().fg(self.accent),
-            )),
-            Line::from(Span::styled(
-                "Chat below. Tab opens config. Ctrl+C twice exits.",
-                Style::default().fg(self.muted),
-            )),
-        ];
+        ]
+    }
 
-        if width >= 72 {
-            full.to_vec()
-        } else {
-            vec![
-                Line::from(vec![
-                    Span::styled("RustCode ", self.title_style()),
-                    Span::styled(
-                        format!("v{}", env!("CARGO_PKG_VERSION")),
-                        self.muted_style(),
-                    ),
-                ]),
-                Line::from(Span::styled(
-                    "  _~^~^~_   Rust-native coding assistant",
-                    Style::default().fg(self.accent),
-                )),
-                Line::from(Span::styled(
-                    " \\) / o o \\ (/  Tab opens config",
-                    self.muted_style(),
-                )),
-            ]
-        }
+    pub fn empty_chat_lines(self, width: u16) -> Vec<Line<'static>> {
+        let mut lines = self.welcome_lines(width);
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            "Start a conversation or press Tab to configure providers.",
+            self.muted_style(),
+        )));
+        lines
     }
 }

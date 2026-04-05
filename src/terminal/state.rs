@@ -2,6 +2,7 @@ use crate::{
     api::ChatMessage,
     config::{ApiProvider, FallbackTarget, Settings},
     onboarding::OnboardingDraft,
+    terminal::theme::SPINNER_FRAMES,
 };
 use std::{
     sync::mpsc::Receiver,
@@ -75,6 +76,10 @@ pub struct TerminalState {
     pub pending_response: Option<Receiver<anyhow::Result<String>>>,
     pub thinking: bool,
     pub initial_prompt: Option<String>,
+    pub spinner_tick: usize,
+    pub last_tick: Instant,
+    #[allow(dead_code)]
+    pub working_dir: String,
 }
 
 impl TerminalState {
@@ -84,19 +89,6 @@ impl TerminalState {
         } else {
             ViewMode::Chat
         };
-
-        let mut messages = vec![DisplayMessage {
-            role: DisplayRole::System,
-            content: "Ready. Use Tab to move focus and Ctrl+C twice to exit.".to_string(),
-        }];
-
-        if view == ViewMode::Chat {
-            messages.push(DisplayMessage {
-                role: DisplayRole::Assistant,
-                content: "Welcome to RustCode. Ask about your code or configure providers from the onboarding flow."
-                    .to_string(),
-            });
-        }
 
         Self {
             draft: OnboardingDraft::from_settings(&settings),
@@ -113,16 +105,22 @@ impl TerminalState {
             status: if view == ViewMode::Onboarding {
                 "First run detected. Complete onboarding to start coding.".to_string()
             } else {
-                "Ready".to_string()
+                "Ready.".to_string()
             },
             input: String::new(),
             should_quit: false,
             confirm_exit_deadline: None,
-            messages,
+            messages: Vec::new(),
             conversation_history: Vec::new(),
             pending_response: None,
             thinking: false,
             initial_prompt,
+            spinner_tick: 0,
+            last_tick: Instant::now(),
+            working_dir: std::env::current_dir()
+                .ok()
+                .and_then(|p| p.to_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| "~".to_string()),
         }
     }
 
@@ -206,5 +204,27 @@ impl TerminalState {
             ),
         });
         Ok(())
+    }
+
+    pub fn tick_spinner(&mut self) {
+        if !self.thinking {
+            self.spinner_tick = 0;
+            return;
+        }
+        if self.last_tick.elapsed() >= std::time::Duration::from_millis(120) {
+            self.spinner_tick = self.spinner_tick.wrapping_add(1);
+            self.last_tick = Instant::now();
+        }
+    }
+
+    pub fn spinner_char(&self) -> char {
+        let len = SPINNER_FRAMES.len();
+        let cycle = len * 2 - 2;
+        let pos = self.spinner_tick % cycle;
+        if pos < len {
+            SPINNER_FRAMES[pos]
+        } else {
+            SPINNER_FRAMES[cycle - pos]
+        }
     }
 }

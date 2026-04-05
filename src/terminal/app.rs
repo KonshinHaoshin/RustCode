@@ -3,7 +3,7 @@ use super::{
         DisplayMessage, DisplayRole, FallbackField, OnboardingStep, PrimaryField, TerminalState,
         ViewMode,
     },
-    theme::TerminalTheme,
+    theme::{TerminalTheme, BLACK_CIRCLE, GUTTER},
 };
 use crate::{
     api::{ApiClient, ChatMessage},
@@ -54,6 +54,7 @@ impl TerminalApp {
     pub fn run(&mut self) -> anyhow::Result<()> {
         loop {
             self.poll_pending_response();
+            self.state.tick_spinner();
             self.state.clear_exit_confirmation_if_stale();
 
             if let Some(prompt) = self.state.consume_initial_prompt() {
@@ -79,32 +80,9 @@ impl TerminalApp {
         let theme = self.theme;
         let state = &self.state;
 
-        self.terminal.draw(|frame| {
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(if frame.size().width >= 72 { 9 } else { 5 }),
-                    Constraint::Min(10),
-                    Constraint::Length(4),
-                ])
-                .split(frame.size());
-
-            let header = Paragraph::new(theme.welcome_lines(chunks[0].width))
-                .block(theme.bordered_block().title(" RustCode "))
-                .wrap(ratatui::widgets::Wrap { trim: false });
-            frame.render_widget(header, chunks[0]);
-
-            match state.view {
-                ViewMode::Onboarding => render_onboarding(frame, chunks[1], theme, state),
-                ViewMode::Chat => render_chat(frame, chunks[1], theme, state),
-            }
-
-            frame.render_widget(
-                Paragraph::new(state.status.as_str())
-                    .alignment(Alignment::Left)
-                    .block(theme.bordered_block().title(" Status ")),
-                chunks[2],
-            );
+        self.terminal.draw(|frame| match state.view {
+            ViewMode::Onboarding => draw_onboarding_view(frame, theme, state),
+            ViewMode::Chat => draw_chat_view(frame, theme, state),
         })?;
 
         Ok(())
@@ -465,6 +443,45 @@ impl Drop for TerminalApp {
     }
 }
 
+fn draw_onboarding_view(
+    frame: &mut ratatui::Frame<'_>,
+    theme: TerminalTheme,
+    state: &TerminalState,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(9),
+            Constraint::Min(10),
+            Constraint::Length(1),
+        ])
+        .split(frame.size());
+
+    frame.render_widget(
+        Paragraph::new(theme.welcome_lines(chunks[0].width))
+            .alignment(Alignment::Left)
+            .wrap(ratatui::widgets::Wrap { trim: false }),
+        chunks[0],
+    );
+    render_onboarding(frame, chunks[1], theme, state);
+    render_status_line(frame, chunks[2], theme, state);
+}
+
+fn draw_chat_view(frame: &mut ratatui::Frame<'_>, theme: TerminalTheme, state: &TerminalState) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(8),
+            Constraint::Length(5),
+            Constraint::Length(1),
+        ])
+        .split(frame.size());
+
+    render_chat(frame, chunks[0], theme, state);
+    render_prompt(frame, chunks[1], theme, state);
+    render_status_line(frame, chunks[2], theme, state);
+}
+
 fn render_onboarding(
     frame: &mut ratatui::Frame<'_>,
     area: ratatui::layout::Rect,
@@ -514,7 +531,7 @@ fn render_onboarding(
             .chain(std::iter::once(Line::from(Span::styled(
                 "Press Enter to save and open chat.",
                 Style::default()
-                    .fg(theme.accent)
+                    .fg(theme.shimmer)
                     .add_modifier(Modifier::BOLD),
             ))))
             .collect(),
@@ -522,7 +539,7 @@ fn render_onboarding(
 
     frame.render_widget(
         Paragraph::new(lines)
-            .block(theme.bordered_block().title(" Onboarding "))
+            .block(theme.prompt_block().title(" Onboarding "))
             .wrap(ratatui::widgets::Wrap { trim: false }),
         area,
     );
@@ -534,60 +551,163 @@ fn render_chat(
     theme: TerminalTheme,
     state: &TerminalState,
 ) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(8), Constraint::Length(6)])
-        .split(area);
-
-    let transcript = render_chat_lines(state, theme);
+    let transcript = render_chat_lines(state, theme, area.width);
     frame.render_widget(
         Paragraph::new(transcript)
-            .block(theme.bordered_block().title(" Conversation "))
+            .alignment(Alignment::Left)
             .wrap(ratatui::widgets::Wrap { trim: false }),
-        chunks[0],
-    );
-    frame.render_widget(
-        Paragraph::new(state.input.as_str())
-            .block(theme.bordered_block().title(if state.thinking {
-                " Input [thinking] "
-            } else {
-                " Input "
-            }))
-            .wrap(ratatui::widgets::Wrap { trim: false }),
-        chunks[1],
+        area,
     );
 }
 
-fn render_chat_lines(state: &TerminalState, theme: TerminalTheme) -> Vec<Line<'static>> {
+fn render_chat_lines(
+    state: &TerminalState,
+    theme: TerminalTheme,
+    width: u16,
+) -> Vec<Line<'static>> {
+    if state.messages.is_empty() {
+        return theme.empty_chat_lines(width);
+    }
+
     let mut lines = Vec::new();
 
     for message in &state.messages {
-        let (label, color) = match message.role {
-            DisplayRole::User => ("You", theme.accent),
-            DisplayRole::Assistant => ("FerrisCode", theme.brand),
-            DisplayRole::System => ("System", theme.muted),
-        };
-
-        lines.push(Line::from(Span::styled(
-            label,
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        )));
-
-        for content_line in message.content.lines() {
-            lines.push(Line::from(Span::styled(
-                content_line.to_string(),
-                Style::default().fg(theme.text),
-            )));
+        match message.role {
+            DisplayRole::User => {
+                for content_line in message.content.lines() {
+                    lines.push(Line::from(Span::styled(
+                        format!(" {}", content_line),
+                        Style::default()
+                            .fg(theme.text)
+                            .bg(theme.user_msg_bg),
+                    )));
+                }
+                if message.content.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        " ",
+                        Style::default().bg(theme.user_msg_bg),
+                    )));
+                }
+            }
+            DisplayRole::Assistant => {
+                for content_line in message.content.lines() {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            format!("{} ", GUTTER),
+                            Style::default().fg(theme.subtle),
+                        ),
+                        Span::styled(
+                            content_line.to_string(),
+                            Style::default().fg(theme.text),
+                        ),
+                    ]));
+                }
+                if message.content.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        format!("{} ", GUTTER),
+                        Style::default().fg(theme.subtle),
+                    )));
+                }
+            }
+            DisplayRole::System => {
+                for content_line in message.content.lines() {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            format!("{} ", BLACK_CIRCLE),
+                            Style::default().fg(theme.error),
+                        ),
+                        Span::styled(
+                            content_line.to_string(),
+                            Style::default().fg(theme.error),
+                        ),
+                    ]));
+                }
+            }
         }
-
-        if message.content.is_empty() {
-            lines.push(Line::from(""));
-        }
-
         lines.push(Line::default());
     }
 
     lines
+}
+
+fn render_prompt(
+    frame: &mut ratatui::Frame<'_>,
+    area: ratatui::layout::Rect,
+    theme: TerminalTheme,
+    state: &TerminalState,
+) {
+    let mut lines: Vec<Line<'static>> = if state.input.is_empty() {
+        vec![Line::from(Span::styled(
+            "What do you want to do?",
+            theme.muted_style(),
+        ))]
+    } else {
+        state
+            .input
+            .lines()
+            .map(|line| {
+                Line::from(Span::styled(
+                    line.to_string(),
+                    Style::default().fg(theme.text),
+                ))
+            })
+            .collect::<Vec<_>>()
+    };
+
+    if state.thinking {
+        lines.push(Line::default());
+        lines.push(Line::from(vec![
+            Span::styled(
+                state.spinner_char().to_string(),
+                Style::default().fg(theme.brand),
+            ),
+            Span::styled(" thinking…", theme.muted_style()),
+        ]));
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(theme.prompt_block())
+            .wrap(ratatui::widgets::Wrap { trim: false }),
+        area,
+    );
+}
+
+fn render_status_line(
+    frame: &mut ratatui::Frame<'_>,
+    area: ratatui::layout::Rect,
+    theme: TerminalTheme,
+    state: &TerminalState,
+) {
+    let dot_color = if state.thinking {
+        theme.brand
+    } else {
+        theme.success
+    };
+
+    let provider_info = format!(
+        "{}/{}",
+        state.settings.api.provider_label(),
+        state.settings.model
+    );
+
+    let mut spans = vec![
+        Span::styled(
+            format!("{} ", BLACK_CIRCLE),
+            Style::default().fg(dot_color),
+        ),
+        Span::styled(provider_info, theme.muted_style()),
+    ];
+
+    if !state.thinking && !state.status.is_empty() {
+        spans.push(Span::styled("  ∙  ", theme.muted_style()));
+        spans.push(Span::styled(state.status.clone(), theme.muted_style()));
+    }
+
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).alignment(Alignment::Left),
+        area,
+    );
 }
 
 fn render_primary_line(
@@ -668,23 +788,24 @@ fn render_fallback_list(state: &TerminalState, theme: TerminalTheme) -> Vec<Line
         )));
     } else {
         for (index, target) in state.draft.fallback_chain.iter().enumerate() {
-            let marker = if index == state.selected_fallback {
-                "> "
+            let selected = index == state.selected_fallback;
+            if selected {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("{} ", BLACK_CIRCLE),
+                        Style::default().fg(theme.brand),
+                    ),
+                    Span::styled(
+                        OnboardingDraft::fallback_target_label(target),
+                        Style::default().fg(theme.text),
+                    ),
+                ]));
             } else {
-                "  "
-            };
-            lines.push(Line::from(Span::styled(
-                format!(
-                    "{}{}",
-                    marker,
-                    OnboardingDraft::fallback_target_label(target)
-                ),
-                Style::default().fg(if index == state.selected_fallback {
-                    theme.accent
-                } else {
-                    theme.text
-                }),
-            )));
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", OnboardingDraft::fallback_target_label(target)),
+                    Style::default().fg(theme.text),
+                )));
+            }
         }
     }
 
@@ -702,18 +823,28 @@ fn render_field_line(
     focused: bool,
     theme: TerminalTheme,
 ) -> Line<'static> {
-    let prefix = if focused { "> " } else { "  " };
-    Line::from(vec![
-        Span::styled(
-            prefix.to_string(),
-            Style::default().fg(if focused { theme.accent } else { theme.muted }),
-        ),
-        Span::styled(
-            format!("{label}: "),
-            Style::default().fg(if focused { theme.accent } else { theme.muted }),
-        ),
-        Span::styled(value, Style::default().fg(theme.text)),
-    ])
+    if focused {
+        Line::from(vec![
+            Span::styled(
+                format!("{} ", BLACK_CIRCLE),
+                Style::default().fg(theme.brand),
+            ),
+            Span::styled(
+                format!("{label}: "),
+                Style::default().fg(theme.brand),
+            ),
+            Span::styled(value, Style::default().fg(theme.text)),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("  ", Style::default().fg(theme.muted)),
+            Span::styled(
+                format!("{label}: "),
+                Style::default().fg(theme.muted),
+            ),
+            Span::styled(value, Style::default().fg(theme.text)),
+        ])
+    }
 }
 
 fn mask_secret(value: Option<&str>) -> String {
@@ -729,7 +860,7 @@ fn mask_secret(value: Option<&str>) -> String {
                 .collect();
             format!("********{}", tail)
         }
-        None => "env or empty".to_string(),
+        None => "not set".to_string(),
     }
 }
 

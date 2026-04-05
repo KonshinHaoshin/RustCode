@@ -1,6 +1,6 @@
 [package]
 name = "rustcode"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "fork自https://github.com/lorryjovens-hub/claude-code-rust开始重构的rustcode"
 license = "MIT"
