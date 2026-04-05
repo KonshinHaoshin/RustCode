@@ -11,7 +11,7 @@ use crate::{
     onboarding::OnboardingDraft,
 };
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -40,7 +40,7 @@ impl TerminalApp {
     pub fn new(settings: Settings, initial_prompt: Option<String>) -> anyhow::Result<Self> {
         enable_raw_mode()?;
         let mut stdout = stdout();
-        execute!(stdout, EnterAlternateScreen)?;
+        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend)?;
 
@@ -89,22 +89,37 @@ impl TerminalApp {
     }
 
     fn handle_event(&mut self, event: Event) -> anyhow::Result<()> {
-        if let Event::Key(key) = event {
-            if key.kind != KeyEventKind::Press {
-                return Ok(());
+        match event {
+            Event::Key(key) => {
+                if key.kind != KeyEventKind::Press {
+                    return Ok(());
+                }
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                    self.state.request_exit();
+                    return Ok(());
+                }
+                match self.state.view {
+                    ViewMode::Chat => self.handle_chat_key(key),
+                    ViewMode::Onboarding => self.handle_onboarding_key(key)?,
+                }
             }
-
-            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                self.state.request_exit();
-                return Ok(());
+            Event::Mouse(mouse) => {
+                if self.state.view == ViewMode::Chat {
+                    match mouse.kind {
+                        MouseEventKind::ScrollDown => {
+                            self.state.scroll_offset =
+                                self.state.scroll_offset.saturating_add(3);
+                        }
+                        MouseEventKind::ScrollUp => {
+                            self.state.scroll_offset =
+                                self.state.scroll_offset.saturating_sub(3);
+                        }
+                        _ => {}
+                    }
+                }
             }
-
-            match self.state.view {
-                ViewMode::Chat => self.handle_chat_key(key),
-                ViewMode::Onboarding => self.handle_onboarding_key(key)?,
-            }
+            _ => {}
         }
-
         Ok(())
     }
 
@@ -417,6 +432,7 @@ impl TerminalApp {
                     .push(ChatMessage::assistant(content));
                 self.state.thinking = false;
                 self.state.status = "Response received.".to_string();
+                self.state.scroll_offset = 0; // snap to bottom on new message
             }
             Ok(Err(error)) => {
                 self.state.messages.push(DisplayMessage {
@@ -438,7 +454,11 @@ impl TerminalApp {
 impl Drop for TerminalApp {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+        let _ = execute!(
+            self.terminal.backend_mut(),
+            LeaveAlternateScreen,
+            DisableMouseCapture
+        );
         let _ = self.terminal.show_cursor();
     }
 }
@@ -552,9 +572,19 @@ fn render_chat(
     state: &TerminalState,
 ) {
     let transcript = render_chat_lines(state, theme, area.width);
+    let total_lines = transcript.len() as u16;
+    let visible = area.height;
+
+    // scroll_offset == 0 means "pinned to bottom"
+    // positive offset scrolls up (shows older content)
+    let max_scroll = total_lines.saturating_sub(visible);
+    let scroll_up = state.scroll_offset as u16;
+    let scroll_row = max_scroll.saturating_sub(scroll_up);
+
     frame.render_widget(
         Paragraph::new(transcript)
             .alignment(Alignment::Left)
+            .scroll((scroll_row, 0))
             .wrap(ratatui::widgets::Wrap { trim: false }),
         area,
     );

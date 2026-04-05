@@ -80,6 +80,7 @@ pub struct TerminalState {
     pub last_tick: Instant,
     #[allow(dead_code)]
     pub working_dir: String,
+    pub scroll_offset: usize,
 }
 
 impl TerminalState {
@@ -121,6 +122,7 @@ impl TerminalState {
                 .ok()
                 .and_then(|p| p.to_str().map(|s| s.to_string()))
                 .unwrap_or_else(|| "~".to_string()),
+            scroll_offset: 0,
         }
     }
 
