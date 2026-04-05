@@ -1,7 +1,7 @@
 use super::{
     state::{
-        DisplayMessage, DisplayRole, FallbackField, OnboardingStep, PrimaryField, TerminalState,
-        ViewMode,
+        ChatWorkerResult, DisplayMessage, DisplayRole, FallbackField, OnboardingStep,
+        PendingChatRequest, PrimaryField, TerminalState, ViewMode,
     },
     theme::{TerminalTheme, BLACK_CIRCLE, GUTTER},
 };
@@ -11,7 +11,10 @@ use crate::{
     onboarding::OnboardingDraft,
 };
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -25,7 +28,7 @@ use ratatui::{
 };
 use std::{
     io::{stdout, Stdout},
-    sync::mpsc::{self, Receiver},
+    sync::{mpsc, Arc},
     thread,
     time::Duration,
 };
@@ -52,24 +55,41 @@ impl TerminalApp {
     }
 
     pub fn run(&mut self) -> anyhow::Result<()> {
+        let mut needs_redraw = true;
+
         loop {
-            self.poll_pending_response();
-            self.state.tick_spinner();
-            self.state.clear_exit_confirmation_if_stale();
+            let mut state_changed = false;
+            state_changed |= self.poll_pending_response();
+            state_changed |= self.state.tick_spinner();
+            state_changed |= self.clear_exit_confirmation_if_stale();
 
             if let Some(prompt) = self.state.consume_initial_prompt() {
                 self.state.input = prompt;
-                self.submit_prompt();
+                state_changed |= self.submit_prompt();
             }
 
-            self.draw()?;
+            if state_changed {
+                needs_redraw = true;
+            }
+
+            if needs_redraw {
+                self.draw()?;
+                needs_redraw = false;
+            }
 
             if self.state.should_quit {
                 break;
             }
 
-            if event::poll(Duration::from_millis(80))? {
-                self.handle_event(event::read()?)?;
+            let timeout = self
+                .state
+                .time_until_next_spinner_frame()
+                .unwrap_or(Duration::from_secs(60));
+
+            if event::poll(timeout)? {
+                if self.handle_event(event::read()?)? {
+                    needs_redraw = true;
+                }
             }
         }
 
@@ -78,7 +98,7 @@ impl TerminalApp {
 
     fn draw(&mut self) -> anyhow::Result<()> {
         let theme = self.theme;
-        let state = &self.state;
+        let state = &mut self.state;
 
         self.terminal.draw(|frame| match state.view {
             ViewMode::Onboarding => draw_onboarding_view(frame, theme, state),
@@ -88,69 +108,85 @@ impl TerminalApp {
         Ok(())
     }
 
-    fn handle_event(&mut self, event: Event) -> anyhow::Result<()> {
+    fn clear_exit_confirmation_if_stale(&mut self) -> bool {
+        let had_deadline = self.state.confirm_exit_deadline.is_some();
+        self.state.clear_exit_confirmation_if_stale();
+        had_deadline && self.state.confirm_exit_deadline.is_none()
+    }
+
+    fn handle_event(&mut self, event: Event) -> anyhow::Result<bool> {
         match event {
             Event::Key(key) => {
                 if key.kind != KeyEventKind::Press {
-                    return Ok(());
+                    return Ok(false);
                 }
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                     self.state.request_exit();
-                    return Ok(());
+                    return Ok(true);
                 }
                 match self.state.view {
-                    ViewMode::Chat => self.handle_chat_key(key),
-                    ViewMode::Onboarding => self.handle_onboarding_key(key)?,
+                    ViewMode::Chat => Ok(self.handle_chat_key(key)),
+                    ViewMode::Onboarding => self.handle_onboarding_key(key),
                 }
             }
             Event::Mouse(mouse) => {
                 if self.state.view == ViewMode::Chat {
+                    let old_offset = self.state.scroll_offset;
                     match mouse.kind {
                         MouseEventKind::ScrollDown => {
-                            self.state.scroll_offset =
-                                self.state.scroll_offset.saturating_add(3);
+                            self.state.scroll_offset = self.state.scroll_offset.saturating_add(3);
                         }
                         MouseEventKind::ScrollUp => {
-                            self.state.scroll_offset =
-                                self.state.scroll_offset.saturating_sub(3);
+                            self.state.scroll_offset = self.state.scroll_offset.saturating_sub(3);
                         }
                         _ => {}
                     }
+                    return Ok(self.state.scroll_offset != old_offset);
                 }
+                Ok(false)
             }
-            _ => {}
+            Event::Resize(_, _) => Ok(true),
+            _ => Ok(false),
         }
-        Ok(())
     }
 
-    fn handle_chat_key(&mut self, key: KeyEvent) {
+    fn handle_chat_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Enter => {
                 if key.modifiers.contains(KeyModifiers::SHIFT) {
                     self.state.input.push('\n');
+                    true
                 } else {
-                    self.submit_prompt();
+                    self.submit_prompt()
                 }
             }
             KeyCode::Backspace => {
+                let had_input = !self.state.input.is_empty();
                 self.state.input.pop();
+                had_input
             }
             KeyCode::Tab => {
                 self.state.view = ViewMode::Onboarding;
                 self.state.onboarding_step = OnboardingStep::Summary;
                 self.state.status = "Opened configuration summary.".to_string();
+                true
             }
             KeyCode::Esc => {
+                let had_input = !self.state.input.is_empty();
                 self.state.input.clear();
+                had_input
             }
             KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.state.input.push(ch);
+                true
             }
-            _ => {}
+            _ => false,
         }
     }
 
-    fn handle_onboarding_key(&mut self, key: KeyEvent) -> anyhow::Result<()> {
+    fn handle_onboarding_key(&mut self, key: KeyEvent) -> anyhow::Result<bool> {
+        let before = OnboardingSnapshot::capture(&self.state);
+
         match self.state.onboarding_step {
             OnboardingStep::Welcome => match key.code {
                 KeyCode::Enter | KeyCode::Tab | KeyCode::Right => {
@@ -174,7 +210,7 @@ impl TerminalApp {
             },
         }
 
-        Ok(())
+        Ok(before != OnboardingSnapshot::capture(&self.state))
     }
 
     fn handle_primary_key(&mut self, key: KeyEvent) {
@@ -388,64 +424,94 @@ impl TerminalApp {
         }
     }
 
-    fn submit_prompt(&mut self) {
+    fn submit_prompt(&mut self) -> bool {
         if self.state.thinking {
-            return;
+            return false;
         }
         let prompt = self.state.input.trim().to_string();
         if prompt.is_empty() {
-            return;
+            return false;
         }
 
-        self.state.messages.push(DisplayMessage {
+        let message = DisplayMessage {
             role: DisplayRole::User,
             content: prompt.clone(),
-        });
-        self.state
-            .conversation_history
-            .push(ChatMessage::user(prompt));
+        };
+        self.state.messages.push(message);
         self.state.input.clear();
-        self.state.pending_response = Some(spawn_chat_request(
-            self.state.settings.clone(),
-            self.state.conversation_history.clone(),
-        ));
+        self.state.scroll_offset = 0;
         self.state.thinking = true;
+        self.state.spinner_tick = 0;
+        self.state.last_tick = std::time::Instant::now();
         self.state.status = format!(
             "Querying {}/{}",
             self.state.settings.api.provider_label(),
             self.state.settings.model
         );
+        self.state.mark_chat_render_dirty();
+
+        let user_message = ChatMessage::user(prompt);
+        let base_history = Arc::clone(&self.state.conversation_history);
+        self.state.pending_response = Some(PendingChatRequest {
+            receiver: spawn_chat_request(
+                self.state.settings.clone(),
+                Arc::clone(&base_history),
+                user_message.clone(),
+            ),
+            base_history,
+            user_message,
+        });
+
+        true
     }
 
-    fn poll_pending_response(&mut self) {
-        let Some(receiver) = self.state.pending_response.take() else {
-            return;
+    fn poll_pending_response(&mut self) -> bool {
+        let Some(pending) = self.state.pending_response.take() else {
+            return false;
         };
-        match receiver.try_recv() {
-            Ok(Ok(content)) => {
-                self.state.messages.push(DisplayMessage {
-                    role: DisplayRole::Assistant,
-                    content: content.clone(),
-                });
-                self.state
-                    .conversation_history
-                    .push(ChatMessage::assistant(content));
+        match pending.receiver.try_recv() {
+            Ok(ChatWorkerResult { history, result }) => {
+                self.state.conversation_history = Arc::new(history);
                 self.state.thinking = false;
-                self.state.status = "Response received.".to_string();
-                self.state.scroll_offset = 0; // snap to bottom on new message
+                match result {
+                    Ok(content) => {
+                        self.state.messages.push(DisplayMessage {
+                            role: DisplayRole::Assistant,
+                            content: content.clone(),
+                        });
+                        let mut next_history = (*self.state.conversation_history).clone();
+                        next_history.push(ChatMessage::assistant(content));
+                        self.state.conversation_history = Arc::new(next_history);
+                        self.state.status = "Response received.".to_string();
+                        self.state.scroll_offset = 0;
+                    }
+                    Err(error) => {
+                        self.state.messages.push(DisplayMessage {
+                            role: DisplayRole::System,
+                            content: format!("Request failed: {}", error),
+                        });
+                        self.state.status = "Request failed.".to_string();
+                    }
+                }
+                self.state.mark_chat_render_dirty();
+                true
             }
-            Ok(Err(error)) => {
-                self.state.messages.push(DisplayMessage {
-                    role: DisplayRole::System,
-                    content: format!("Request failed: {}", error),
-                });
-                self.state.thinking = false;
-                self.state.status = "Request failed.".to_string();
+            Err(mpsc::TryRecvError::Empty) => {
+                self.state.pending_response = Some(pending);
+                false
             }
-            Err(mpsc::TryRecvError::Empty) => self.state.pending_response = Some(receiver),
             Err(mpsc::TryRecvError::Disconnected) => {
+                let mut restored_history = (*pending.base_history).clone();
+                restored_history.push(pending.user_message);
+                self.state.conversation_history = Arc::new(restored_history);
                 self.state.thinking = false;
                 self.state.status = "Request worker disconnected.".to_string();
+                self.state.messages.push(DisplayMessage {
+                    role: DisplayRole::System,
+                    content: "Request worker disconnected.".to_string(),
+                });
+                self.state.mark_chat_render_dirty();
+                true
             }
         }
     }
@@ -460,6 +526,35 @@ impl Drop for TerminalApp {
             DisableMouseCapture
         );
         let _ = self.terminal.show_cursor();
+    }
+}
+
+#[derive(PartialEq, Eq)]
+struct OnboardingSnapshot {
+    view: ViewMode,
+    onboarding_step: OnboardingStep,
+    onboarding_focus: usize,
+    selected_fallback: usize,
+    editing_fallback: Option<usize>,
+    fallback_enabled: bool,
+    fallback_len: usize,
+    status: String,
+    draft: OnboardingDraft,
+}
+
+impl OnboardingSnapshot {
+    fn capture(state: &TerminalState) -> Self {
+        Self {
+            view: state.view,
+            onboarding_step: state.onboarding_step,
+            onboarding_focus: state.onboarding_focus,
+            selected_fallback: state.selected_fallback,
+            editing_fallback: state.editing_fallback,
+            fallback_enabled: state.draft.fallback_enabled,
+            fallback_len: state.draft.fallback_chain.len(),
+            status: state.status.clone(),
+            draft: state.draft.clone(),
+        }
     }
 }
 
@@ -478,7 +573,7 @@ fn draw_onboarding_view(
         .split(frame.size());
 
     frame.render_widget(
-        Paragraph::new(theme.welcome_lines(chunks[0].width))
+        Paragraph::new(theme.welcome_lines(chunks[0].width, &state.working_dir))
             .alignment(Alignment::Left)
             .wrap(ratatui::widgets::Wrap { trim: false }),
         chunks[0],
@@ -487,7 +582,7 @@ fn draw_onboarding_view(
     render_status_line(frame, chunks[2], theme, state);
 }
 
-fn draw_chat_view(frame: &mut ratatui::Frame<'_>, theme: TerminalTheme, state: &TerminalState) {
+fn draw_chat_view(frame: &mut ratatui::Frame<'_>, theme: TerminalTheme, state: &mut TerminalState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -569,25 +664,32 @@ fn render_chat(
     frame: &mut ratatui::Frame<'_>,
     area: ratatui::layout::Rect,
     theme: TerminalTheme,
-    state: &TerminalState,
+    state: &mut TerminalState,
 ) {
-    let transcript = render_chat_lines(state, theme, area.width);
-    let total_lines = transcript.len() as u16;
+    ensure_chat_cache(state, theme, area.width);
+    let total_lines = state.chat_render_line_count;
     let visible = area.height;
 
-    // scroll_offset == 0 means "pinned to bottom"
-    // positive offset scrolls up (shows older content)
     let max_scroll = total_lines.saturating_sub(visible);
     let scroll_up = state.scroll_offset as u16;
     let scroll_row = max_scroll.saturating_sub(scroll_up);
 
-    frame.render_widget(
-        Paragraph::new(transcript)
+    let paragraph = std::mem::take(&mut state.chat_render_cache).scroll((scroll_row, 0));
+    frame.render_widget(&paragraph, area);
+    state.chat_render_cache = paragraph.scroll((0, 0));
+}
+
+fn ensure_chat_cache(state: &mut TerminalState, theme: TerminalTheme, width: u16) {
+    if state.chat_render_dirty || state.chat_render_width != width {
+        let lines = render_chat_lines(state, theme, width);
+        let paragraph = Paragraph::new(lines)
             .alignment(Alignment::Left)
-            .scroll((scroll_row, 0))
-            .wrap(ratatui::widgets::Wrap { trim: false }),
-        area,
-    );
+            .wrap(ratatui::widgets::Wrap { trim: false });
+        state.chat_render_line_count = paragraph.line_count(width) as u16;
+        state.chat_render_cache = paragraph;
+        state.chat_render_width = width;
+        state.chat_render_dirty = false;
+    }
 }
 
 fn render_chat_lines(
@@ -596,7 +698,7 @@ fn render_chat_lines(
     width: u16,
 ) -> Vec<Line<'static>> {
     if state.messages.is_empty() {
-        return theme.empty_chat_lines(width);
+        return theme.empty_chat_lines(width, &state.working_dir);
     }
 
     let mut lines = Vec::new();
@@ -607,9 +709,7 @@ fn render_chat_lines(
                 for content_line in message.content.lines() {
                     lines.push(Line::from(Span::styled(
                         format!(" {}", content_line),
-                        Style::default()
-                            .fg(theme.text)
-                            .bg(theme.user_msg_bg),
+                        Style::default().fg(theme.text).bg(theme.user_msg_bg),
                     )));
                 }
                 if message.content.is_empty() {
@@ -622,14 +722,8 @@ fn render_chat_lines(
             DisplayRole::Assistant => {
                 for content_line in message.content.lines() {
                     lines.push(Line::from(vec![
-                        Span::styled(
-                            format!("{} ", GUTTER),
-                            Style::default().fg(theme.subtle),
-                        ),
-                        Span::styled(
-                            content_line.to_string(),
-                            Style::default().fg(theme.text),
-                        ),
+                        Span::styled(format!("{} ", GUTTER), Style::default().fg(theme.subtle)),
+                        Span::styled(content_line.to_string(), Style::default().fg(theme.text)),
                     ]));
                 }
                 if message.content.is_empty() {
@@ -646,10 +740,7 @@ fn render_chat_lines(
                             format!("{} ", BLACK_CIRCLE),
                             Style::default().fg(theme.error),
                         ),
-                        Span::styled(
-                            content_line.to_string(),
-                            Style::default().fg(theme.error),
-                        ),
+                        Span::styled(content_line.to_string(), Style::default().fg(theme.error)),
                     ]));
                 }
             }
@@ -722,10 +813,7 @@ fn render_status_line(
     );
 
     let mut spans = vec![
-        Span::styled(
-            format!("{} ", BLACK_CIRCLE),
-            Style::default().fg(dot_color),
-        ),
+        Span::styled(format!("{} ", BLACK_CIRCLE), Style::default().fg(dot_color)),
         Span::styled(provider_info, theme.muted_style()),
     ];
 
@@ -859,19 +947,13 @@ fn render_field_line(
                 format!("{} ", BLACK_CIRCLE),
                 Style::default().fg(theme.brand),
             ),
-            Span::styled(
-                format!("{label}: "),
-                Style::default().fg(theme.brand),
-            ),
+            Span::styled(format!("{label}: "), Style::default().fg(theme.brand)),
             Span::styled(value, Style::default().fg(theme.text)),
         ])
     } else {
         Line::from(vec![
             Span::styled("  ", Style::default().fg(theme.muted)),
-            Span::styled(
-                format!("{label}: "),
-                Style::default().fg(theme.muted),
-            ),
+            Span::styled(format!("{label}: "), Style::default().fg(theme.muted)),
             Span::styled(value, Style::default().fg(theme.text)),
         ])
     }
@@ -964,17 +1046,23 @@ fn fallback_defaults(provider: ApiProvider) -> FallbackTarget {
 
 fn spawn_chat_request(
     settings: Settings,
-    messages: Vec<ChatMessage>,
-) -> Receiver<anyhow::Result<String>> {
+    base_history: Arc<Vec<ChatMessage>>,
+    user_message: ChatMessage,
+) -> mpsc::Receiver<ChatWorkerResult> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
+        let request_history = {
+            let mut history = (*base_history).clone();
+            history.push(user_message);
+            history
+        };
         let result: anyhow::Result<String> = (|| {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?;
-            runtime.block_on(async move {
+            runtime.block_on(async {
                 let client = ApiClient::new(settings);
-                let response = client.chat(messages).await?;
+                let response = client.chat(&request_history).await?;
                 Ok(response
                     .choices
                     .first()
@@ -982,7 +1070,11 @@ fn spawn_chat_request(
                     .unwrap_or_default())
             })
         })();
-        let _ = sender.send(result);
+        let payload = ChatWorkerResult {
+            history: request_history,
+            result,
+        };
+        let _ = sender.send(payload);
     });
     receiver
 }

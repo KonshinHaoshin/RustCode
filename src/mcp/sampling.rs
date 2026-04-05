@@ -172,7 +172,7 @@ impl SamplingManager {
             })
             .collect();
 
-        let response = api_client.chat(messages).await?;
+        let response = api_client.chat(&messages).await?;
 
         if let Some(choice) = response.choices.first() {
             let usage = response.usage.as_ref();

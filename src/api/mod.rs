@@ -63,7 +63,7 @@ impl ApiClient {
             .collect()
     }
 
-    pub async fn chat(&self, messages: Vec<ChatMessage>) -> anyhow::Result<ChatResponse> {
+    pub async fn chat(&self, messages: &[ChatMessage]) -> anyhow::Result<ChatResponse> {
         let targets = self.request_targets();
         let total_targets = targets.len();
         let mut failures = Vec::new();
@@ -78,7 +78,7 @@ impl ApiClient {
                 );
             }
 
-            match self.chat_once(target, &messages).await {
+            match self.chat_once(target, messages).await {
                 Ok(response) => {
                     if index > 0 {
                         eprintln!("Fallback succeeded with {}", target.display_name());

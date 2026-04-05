@@ -65,17 +65,6 @@ impl ApiProvider {
             _ => ApiProtocol::OpenAi,
         }
     }
-
-    fn api_key_env_vars(&self) -> &'static [&'static str] {
-        match self {
-            Self::DeepSeek => &["DEEPSEEK_API_KEY"],
-            Self::OpenAI => &["OPENAI_API_KEY"],
-            Self::DashScope => &["DASHSCOPE_API_KEY"],
-            Self::OpenRouter => &["OPENROUTER_API_KEY"],
-            Self::Ollama => &["OLLAMA_API_KEY"],
-            Self::Custom => &[],
-        }
-    }
 }
 
 impl Default for ApiProvider {
@@ -114,7 +103,7 @@ impl Default for ApiProtocol {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct FallbackTarget {
     pub provider: ApiProvider,
@@ -176,23 +165,15 @@ pub struct ApiConfig {
 
 impl Default for ApiConfig {
     fn default() -> Self {
-        let provider = std::env::var("RUSTCODE_API_PROVIDER")
-            .ok()
-            .and_then(|value| ApiProvider::parse(&value))
-            .unwrap_or_default();
-        let protocol = std::env::var("RUSTCODE_API_PROTOCOL")
-            .ok()
-            .and_then(|value| ApiProtocol::parse(&value))
-            .unwrap_or_else(|| provider.default_protocol());
+        let provider = ApiProvider::default();
+        let protocol = provider.default_protocol();
 
         Self {
             provider,
             protocol,
             custom_provider_name: None,
-            api_key: Self::resolve_api_key(provider, None, None),
-            base_url: std::env::var("RUSTCODE_API_BASE_URL")
-                .or_else(|_| std::env::var("API_BASE_URL"))
-                .unwrap_or_else(|_| provider.default_base_url().to_string()),
+            api_key: None,
+            base_url: provider.default_base_url().to_string(),
             max_tokens: 4096,
             timeout: 120,
             streaming: true,
@@ -203,34 +184,15 @@ impl Default for ApiConfig {
 }
 
 impl ApiConfig {
-    fn resolve_api_key(
-        provider: ApiProvider,
-        protocol: Option<ApiProtocol>,
-        fallback: Option<String>,
-    ) -> Option<String> {
-        let protocol = protocol.unwrap_or_else(|| provider.default_protocol());
-
-        std::env::var("RUSTCODE_API_KEY")
-            .ok()
-            .or_else(|| std::env::var("API_KEY").ok())
-            .or_else(|| {
-                provider
-                    .api_key_env_vars()
-                    .iter()
-                    .find_map(|name| std::env::var(name).ok())
-            })
-            .or_else(|| {
-                if protocol == ApiProtocol::Anthropic {
-                    std::env::var("ANTHROPIC_API_KEY").ok()
-                } else {
-                    None
-                }
-            })
-            .or_else(|| std::env::var("DEEPSEEK_API_KEY").ok())
-            .or_else(|| std::env::var("OPENAI_API_KEY").ok())
-            .or_else(|| std::env::var("DASHSCOPE_API_KEY").ok())
-            .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
-            .or(fallback)
+    fn sanitize_optional(value: Option<String>) -> Option<String> {
+        value.and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
     }
 
     fn parse_fallback_csv(value: &str) -> anyhow::Result<Vec<FallbackTarget>> {
@@ -261,23 +223,15 @@ impl ApiConfig {
     }
 
     pub fn provider(&self) -> ApiProvider {
-        std::env::var("RUSTCODE_API_PROVIDER")
-            .ok()
-            .and_then(|value| ApiProvider::parse(&value))
-            .unwrap_or(self.provider)
+        self.provider
     }
 
     pub fn protocol(&self) -> ApiProtocol {
-        std::env::var("RUSTCODE_API_PROTOCOL")
-            .ok()
-            .and_then(|value| ApiProtocol::parse(&value))
-            .unwrap_or_else(|| {
-                if self.provider() == ApiProvider::Custom {
-                    self.protocol
-                } else {
-                    self.provider().default_protocol()
-                }
-            })
+        if self.provider() == ApiProvider::Custom {
+            self.protocol
+        } else {
+            self.provider().default_protocol()
+        }
     }
 
     pub fn provider_label(&self) -> String {
@@ -323,22 +277,19 @@ impl ApiConfig {
         Ok(())
     }
 
-    /// Get the API key, checking environment variable first
+    /// Get the configured API key.
     pub fn get_api_key(&self) -> Option<String> {
-        Self::resolve_api_key(self.provider(), Some(self.protocol()), self.api_key.clone())
+        Self::sanitize_optional(self.api_key.clone())
     }
 
-    /// Get the base URL, checking environment variable first
+    /// Get the configured base URL.
     pub fn get_base_url(&self) -> String {
-        std::env::var("RUSTCODE_API_BASE_URL")
-            .or_else(|_| std::env::var("API_BASE_URL"))
-            .unwrap_or_else(|_| {
-                if self.base_url.trim().is_empty() {
-                    self.provider().default_base_url().to_string()
-                } else {
-                    self.base_url.clone()
-                }
-            })
+        let base_url = self.base_url.trim();
+        if base_url.is_empty() {
+            self.provider().default_base_url().to_string()
+        } else {
+            base_url.to_string()
+        }
     }
 
     /// Get the model ID for the given model name
@@ -366,7 +317,7 @@ impl ApiConfig {
             provider,
             protocol,
             provider_label,
-            api_key: Self::resolve_api_key(provider, Some(protocol), self.api_key.clone()),
+            api_key: self.get_api_key(),
             base_url: self.get_base_url(),
             model: self.get_model_id(configured_model),
         }
@@ -403,11 +354,8 @@ impl ApiConfig {
                     provider,
                     protocol,
                     provider_label,
-                    api_key: Self::resolve_api_key(
-                        provider,
-                        Some(protocol),
-                        target.api_key.clone(),
-                    ),
+                    api_key: Self::sanitize_optional(target.api_key.clone())
+                        .or_else(|| self.get_api_key()),
                     base_url: target
                         .base_url
                         .clone()
@@ -417,5 +365,52 @@ impl ApiConfig {
                 }
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ApiConfig, ApiProtocol, ApiProvider};
+
+    #[test]
+    fn default_api_config_uses_builtin_defaults() {
+        let config = ApiConfig::default();
+
+        assert_eq!(config.provider(), ApiProvider::DeepSeek);
+        assert_eq!(config.protocol(), ApiProtocol::OpenAi);
+        assert_eq!(config.get_base_url(), "https://api.deepseek.com");
+        assert_eq!(config.get_api_key(), None);
+    }
+
+    #[test]
+    fn blank_configured_api_key_is_treated_as_missing() {
+        let config = ApiConfig {
+            api_key: Some("   ".to_string()),
+            ..ApiConfig::default()
+        };
+
+        assert_eq!(config.get_api_key(), None);
+    }
+
+    #[test]
+    fn fallback_target_uses_its_own_key_before_primary_key() {
+        let mut config = ApiConfig {
+            api_key: Some("primary-key".to_string()),
+            ..ApiConfig::default()
+        };
+        config.fallback.enabled = true;
+        config.fallback.chain.push(super::FallbackTarget {
+            provider: ApiProvider::Custom,
+            protocol: Some(ApiProtocol::OpenAi),
+            custom_provider_name: Some("backup".to_string()),
+            api_key: Some("fallback-key".to_string()),
+            base_url: Some("https://example.com".to_string()),
+            model: "backup-model".to_string(),
+        });
+
+        let fallback = config.fallback_targets();
+
+        assert_eq!(fallback.len(), 1);
+        assert_eq!(fallback[0].api_key.as_deref(), Some("fallback-key"));
     }
 }

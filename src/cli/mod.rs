@@ -15,7 +15,7 @@ use std::path::PathBuf;
 #[derive(Parser, Debug)]
 #[command(name = "rustcode")]
 #[command(author = "RustCode Contributors")]
-#[command(version = "0.1.0")]
+#[command(version)]
 #[command(about = "High-performance Rust coding assistant with configurable API providers")]
 #[command(disable_version_flag = true)]
 #[command(disable_help_subcommand = true)]

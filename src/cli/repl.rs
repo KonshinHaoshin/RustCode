@@ -86,7 +86,7 @@ impl Repl {
 
         let messages = self.conversation_history.clone();
         let response = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(client.chat(messages))
+            tokio::runtime::Handle::current().block_on(client.chat(&messages))
         });
 
         match response {

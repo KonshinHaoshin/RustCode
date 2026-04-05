@@ -28,7 +28,7 @@ notify = "6.1"
 
 # Terminal UI
 crossterm = { version = "0.27", features = ["event-stream"] }
-ratatui = "0.26"
+ratatui = { version = "0.26", features = ["unstable-rendered-line-info"] }
 
 # Process & Shell
 which = "6.0"

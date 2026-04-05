@@ -4,10 +4,13 @@ use crate::{
     onboarding::OnboardingDraft,
     terminal::theme::SPINNER_FRAMES,
 };
+use ratatui::{text::Line, widgets::Paragraph};
 use std::{
-    sync::mpsc::Receiver,
+    sync::{mpsc::Receiver, Arc},
     time::{Duration, Instant},
 };
+
+const SPINNER_INTERVAL: Duration = Duration::from_millis(120);
 
 #[derive(Debug, Clone)]
 pub enum DisplayRole {
@@ -20,6 +23,19 @@ pub enum DisplayRole {
 pub struct DisplayMessage {
     pub role: DisplayRole,
     pub content: String,
+}
+
+#[derive(Debug)]
+pub struct ChatWorkerResult {
+    pub history: Vec<ChatMessage>,
+    pub result: anyhow::Result<String>,
+}
+
+#[derive(Debug)]
+pub struct PendingChatRequest {
+    pub receiver: Receiver<ChatWorkerResult>,
+    pub base_history: Arc<Vec<ChatMessage>>,
+    pub user_message: ChatMessage,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,15 +88,18 @@ pub struct TerminalState {
     pub should_quit: bool,
     pub confirm_exit_deadline: Option<Instant>,
     pub messages: Vec<DisplayMessage>,
-    pub conversation_history: Vec<ChatMessage>,
-    pub pending_response: Option<Receiver<anyhow::Result<String>>>,
+    pub conversation_history: Arc<Vec<ChatMessage>>,
+    pub pending_response: Option<PendingChatRequest>,
     pub thinking: bool,
     pub initial_prompt: Option<String>,
     pub spinner_tick: usize,
     pub last_tick: Instant,
-    #[allow(dead_code)]
     pub working_dir: String,
     pub scroll_offset: usize,
+    pub chat_render_cache: Paragraph<'static>,
+    pub chat_render_width: u16,
+    pub chat_render_line_count: u16,
+    pub chat_render_dirty: bool,
 }
 
 impl TerminalState {
@@ -112,7 +131,7 @@ impl TerminalState {
             should_quit: false,
             confirm_exit_deadline: None,
             messages: Vec::new(),
-            conversation_history: Vec::new(),
+            conversation_history: Arc::new(Vec::new()),
             pending_response: None,
             thinking: false,
             initial_prompt,
@@ -123,6 +142,10 @@ impl TerminalState {
                 .and_then(|p| p.to_str().map(|s| s.to_string()))
                 .unwrap_or_else(|| "~".to_string()),
             scroll_offset: 0,
+            chat_render_cache: Paragraph::new(Vec::<Line<'static>>::new()),
+            chat_render_width: 0,
+            chat_render_line_count: 0,
+            chat_render_dirty: true,
         }
     }
 
@@ -205,18 +228,31 @@ impl TerminalState {
                 self.draft.fallback_chain.len()
             ),
         });
+        self.mark_chat_render_dirty();
         Ok(())
     }
 
-    pub fn tick_spinner(&mut self) {
+    pub fn mark_chat_render_dirty(&mut self) {
+        self.chat_render_dirty = true;
+    }
+
+    pub fn tick_spinner(&mut self) -> bool {
         if !self.thinking {
-            self.spinner_tick = 0;
-            return;
+            return false;
         }
-        if self.last_tick.elapsed() >= std::time::Duration::from_millis(120) {
+        if self.last_tick.elapsed() >= SPINNER_INTERVAL {
             self.spinner_tick = self.spinner_tick.wrapping_add(1);
             self.last_tick = Instant::now();
+            return true;
         }
+        false
+    }
+
+    pub fn time_until_next_spinner_frame(&self) -> Option<Duration> {
+        if !self.thinking {
+            return None;
+        }
+        Some(SPINNER_INTERVAL.saturating_sub(self.last_tick.elapsed()))
     }
 
     pub fn spinner_char(&self) -> char {

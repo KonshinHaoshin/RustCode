@@ -113,7 +113,7 @@ impl Cli {
         let client = crate::api::ApiClient::new(state.settings.clone());
         let messages = vec![crate::api::ChatMessage::user(&prompt)];
 
-        let response = client.chat(messages).await?;
+        let response = client.chat(&messages).await?;
         if let Some(choice) = response.choices.first() {
             if !choice.message.content.is_empty() {
                 println!("{}", choice.message.content);

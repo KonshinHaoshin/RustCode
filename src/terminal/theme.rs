@@ -61,7 +61,7 @@ impl TerminalTheme {
             .border_style(Style::default().fg(self.border))
     }
 
-    pub fn welcome_lines(self, _width: u16) -> Vec<Line<'static>> {
+    pub fn welcome_lines(self, _width: u16, working_dir: &str) -> Vec<Line<'static>> {
         let brand_style = Style::default().fg(self.brand);
         let subtle_style = Style::default().fg(self.subtle);
 
@@ -82,13 +82,7 @@ impl TerminalTheme {
                     self.muted_style(),
                 ),
             ]),
-            Line::from(Span::styled(
-                std::env::current_dir()
-                    .ok()
-                    .and_then(|p| p.to_str().map(|s| s.to_string()))
-                    .unwrap_or_else(|| "~".to_string()),
-                self.muted_style(),
-            )),
+            Line::from(Span::styled(working_dir.to_string(), self.muted_style())),
             Line::from(Span::styled(
                 "─────────────────────────────────────────",
                 Style::default().fg(self.subtle),
@@ -96,8 +90,8 @@ impl TerminalTheme {
         ]
     }
 
-    pub fn empty_chat_lines(self, width: u16) -> Vec<Line<'static>> {
-        let mut lines = self.welcome_lines(width);
+    pub fn empty_chat_lines(self, width: u16, working_dir: &str) -> Vec<Line<'static>> {
+        let mut lines = self.welcome_lines(width, working_dir);
         lines.push(Line::default());
         lines.push(Line::from(Span::styled(
             "Start a conversation or press Tab to configure providers.",

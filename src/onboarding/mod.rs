@@ -2,7 +2,7 @@
 
 use crate::config::{ApiProtocol, ApiProvider, FallbackTarget, Settings};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OnboardingDraft {
     pub provider: ApiProvider,
     pub protocol: ApiProtocol,
