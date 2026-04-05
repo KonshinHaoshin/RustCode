@@ -163,7 +163,7 @@ if __name__ == "__main__":
 "#,
                 )
                 .with_file("requirements.txt", "")
-                .with_file(".gitignore", "__pycache__/\n*.pyc\n.env\n"),
+                .with_file(".gitignore", "__pycache__/\n*.pyc\n"),
         );
 
         self.templates.insert(

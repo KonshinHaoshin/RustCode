@@ -134,10 +134,10 @@ impl TerminalApp {
                     let old_offset = self.state.scroll_offset;
                     match mouse.kind {
                         MouseEventKind::ScrollDown => {
-                            self.state.scroll_offset = self.state.scroll_offset.saturating_add(3);
+                            self.state.scroll_offset = self.state.scroll_offset.saturating_sub(3);
                         }
                         MouseEventKind::ScrollUp => {
-                            self.state.scroll_offset = self.state.scroll_offset.saturating_sub(3);
+                            self.state.scroll_offset = self.state.scroll_offset.saturating_add(3);
                         }
                         _ => {}
                     }

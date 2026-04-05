@@ -15,19 +15,9 @@ services:
     # 卷挂载
     volumes:
       # 配置文件持久化
-      - claude-config:/home/claude/.config/claude-code
+      - claude-config:/home/claude/.rustcode
       # 可选：挂载项目目录
       # - .:/workspace
-    
-    # 环境变量
-    environment:
-      # 使用你的 API 密钥配置下列变量
-      # ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
-      # API_BASE_URL: ${API_BASE_URL}
-      
-      # 或使用阿里云 DashScope
-      # DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY}
-      # API_BASE_URL: https://coding.dashscope.aliyuncs.com/v1
     
     # 网络（可选）
     networks:
@@ -60,8 +50,6 @@ networks:
 # 4. 查看帮助：
 #    docker-compose run --rm claude-code --help
 #
-# 5. 使用环境变量配置 API（create .env file）：
-#    ANTHROPIC_API_KEY=sk-ant-xxxxxxx
-#    API_BASE_URL=https://api.anthropic.com
-#    docker-compose run --rm claude-code repl
+# 5. 首次运行时进入 onboarding 配置 provider / model / fallback：
+#    docker-compose run --rm claude-code
 #

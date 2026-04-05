@@ -20,7 +20,7 @@ pub fn init_project(name: &str) -> anyhow::Result<()> {
     std::fs::write(project_dir.join("RUSTCODE.md"), rustcode_md)?;
 
     // Create .gitignore
-    let gitignore = "target/\n*.log\n.env\n";
+    let gitignore = "target/\n*.log\n";
     std::fs::write(project_dir.join(".gitignore"), gitignore)?;
 
     println!("Created project structure:");

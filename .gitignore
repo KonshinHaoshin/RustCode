@@ -27,7 +27,13 @@ Thumbs.db
 settings.json
 !settings.json.template
 
+# Environment files
+.env
+.env.*
+
 # Logs
 *.log
 
 AGENTS.md
+CLAUDE.md
+.claude/
