@@ -34,7 +34,7 @@ Status: completed
 - provider 侧 tool schema 适配
 - `tool_use -> tool_result -> continue loop`
 
-Status: pending
+Status: completed
 
 ### Phase 3
 
@@ -42,7 +42,7 @@ Status: pending
 - transcript/session 持久化
 - 可恢复会话
 
-Status: pending
+Status: in_progress
 
 ### Phase 4
 
@@ -87,5 +87,13 @@ Status: pending
 - Phase 0 completed: master plan, phase logs, runtime mapping doc landed under `plan/`
 - Phase 0 completed: `.gitignore` updated to allow tracking `plan/*.md`
 - Phase 1 completed: added `src/runtime` foundation and routed TUI, REPL, `query`, and `run_agent` through `QueryEngine`
+- Phase 2 in progress: added `src/tools_runtime`, canonical runtime tool call/result model, and an OpenAI-style tool loop in `QueryEngine`
+- Phase 2 in progress: builtin tools are now exposed to the OpenAI/custom-open_ai request path, and `execute_command` was fixed for Windows shells
+- Phase 2 in progress: Anthropic now has baseline tool-use/tool-result protocol mapping plus provider-aware tool target selection
+- Phase 2 completed: external MCP stdio tool discovery/execution is integrated into runtime via namespaced tools
+- Phase 3 in progress: runtime tool execution now passes through a permissions gate backed by `settings.permissions`
+- Phase 3 in progress: added project-local `./rustcode/settings.local.json` merge/load and Claude Code-style workspace-local permission persistence
+- Phase 3 in progress: `ask` now yields `AwaitingApproval`, `QueryEngine` can resume after approval, and the TUI exposes inline `allow once` / `deny once` / `always allow` / `always deny`
+- Phase 3 in progress: `src/session` now stores runtime transcript history and TUI restores the latest session from `./rustcode/sessions/`
 - Verification completed: `cargo fmt`, `cargo check`
 - Verification blocked: `cargo test -q query_loop` and `cargo check --tests` failed in this Windows environment with `os error 5` when invoking `rustc` for test compilation

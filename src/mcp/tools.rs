@@ -229,20 +229,19 @@ impl ToolExecutor for BuiltinCommandExecutor {
             .ok_or_else(|| anyhow::anyhow!("Missing command parameter"))?;
         let cwd = params["cwd"].as_str();
 
-        let output = if let Some(dir) = cwd {
-            tokio::process::Command::new("sh")
-                .arg("-c")
-                .arg(command)
-                .current_dir(dir)
-                .output()
-                .await
+        let mut process = if cfg!(target_os = "windows") {
+            let mut command_process = tokio::process::Command::new("cmd");
+            command_process.arg("/C").arg(command);
+            command_process
         } else {
-            tokio::process::Command::new("sh")
-                .arg("-c")
-                .arg(command)
-                .output()
-                .await
+            let mut command_process = tokio::process::Command::new("sh");
+            command_process.arg("-c").arg(command);
+            command_process
         };
+        if let Some(dir) = cwd {
+            process.current_dir(dir);
+        }
+        let output = process.output().await;
 
         match output {
             Ok(output) => {

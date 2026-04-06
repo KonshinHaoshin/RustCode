@@ -95,6 +95,10 @@ impl ApiProtocol {
             Self::Anthropic => "anthropic",
         }
     }
+
+    pub fn supports_tool_calling(&self) -> bool {
+        matches!(self, Self::OpenAi | Self::Anthropic)
+    }
 }
 
 impl Default for ApiProtocol {
@@ -127,6 +131,10 @@ pub struct ResolvedApiTarget {
 impl ResolvedApiTarget {
     pub fn display_name(&self) -> String {
         format!("{}/{}", self.provider_label, self.model)
+    }
+
+    pub fn supports_tool_calling(&self) -> bool {
+        self.protocol.supports_tool_calling()
     }
 }
 

@@ -290,6 +290,11 @@ Be thorough and systematic. Focus on finding and reporting issues."#.to_string()
             agent.system_prompt.clone(),
         )];
         let response = engine.submit_text_turn(&history, prompt).await?;
+        if response.status == crate::runtime::TurnStatus::AwaitingApproval {
+            return Err(anyhow::anyhow!(
+                "Agent execution requires interactive approval. Re-run in TUI."
+            ));
+        }
 
         if let Some(content) = response.assistant_text() {
             return Ok(content.to_string());

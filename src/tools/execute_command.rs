@@ -54,14 +54,18 @@ impl Tool for ExecuteCommandTool {
         let timeout = input["timeout"].as_u64().unwrap_or(60);
 
         // Execute command using tokio::process
-        let output = tokio::time::timeout(
-            std::time::Duration::from_secs(timeout),
-            tokio::process::Command::new("sh")
-                .arg("-c")
-                .arg(command)
-                .output(),
-        )
-        .await;
+        let mut process = if cfg!(target_os = "windows") {
+            let mut command_process = tokio::process::Command::new("cmd");
+            command_process.arg("/C").arg(command);
+            command_process
+        } else {
+            let mut command_process = tokio::process::Command::new("sh");
+            command_process.arg("-c").arg(command);
+            command_process
+        };
+
+        let output =
+            tokio::time::timeout(std::time::Duration::from_secs(timeout), process.output()).await;
 
         match output {
             Ok(Ok(result)) => {

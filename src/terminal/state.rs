@@ -1,7 +1,8 @@
 use crate::{
     config::{ApiProvider, FallbackTarget, Settings},
     onboarding::OnboardingDraft,
-    runtime::RuntimeMessage,
+    runtime::{PendingApproval, QueryTurnResult, RuntimeMessage, RuntimeRole},
+    session::{Session, SessionManager},
     terminal::theme::SPINNER_FRAMES,
 };
 use ratatui::{text::Line, widgets::Paragraph};
@@ -17,6 +18,7 @@ pub enum DisplayRole {
     User,
     Assistant,
     System,
+    Tool,
 }
 
 #[derive(Debug, Clone)]
@@ -25,17 +27,23 @@ pub struct DisplayMessage {
     pub content: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct PendingApprovalViewModel {
+    pub pending: PendingApproval,
+    pub arguments_preview: String,
+    pub focus_index: usize,
+}
+
 #[derive(Debug)]
 pub struct ChatWorkerResult {
-    pub history: Vec<RuntimeMessage>,
-    pub result: anyhow::Result<String>,
+    pub turn: anyhow::Result<QueryTurnResult>,
 }
 
 #[derive(Debug)]
 pub struct PendingChatRequest {
     pub receiver: Receiver<ChatWorkerResult>,
     pub base_history: Arc<Vec<RuntimeMessage>>,
-    pub user_message: RuntimeMessage,
+    pub user_message: Option<RuntimeMessage>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +98,7 @@ pub struct TerminalState {
     pub messages: Vec<DisplayMessage>,
     pub conversation_history: Arc<Vec<RuntimeMessage>>,
     pub pending_response: Option<PendingChatRequest>,
+    pub pending_approval: Option<PendingApprovalViewModel>,
     pub thinking: bool,
     pub initial_prompt: Option<String>,
     pub spinner_tick: usize,
@@ -100,6 +109,8 @@ pub struct TerminalState {
     pub chat_render_width: u16,
     pub chat_render_line_count: u16,
     pub chat_render_dirty: bool,
+    pub session_manager: SessionManager,
+    pub active_session: Option<Session>,
 }
 
 impl TerminalState {
@@ -109,6 +120,43 @@ impl TerminalState {
         } else {
             ViewMode::Chat
         };
+        let working_dir_path = std::env::current_dir().unwrap_or_else(|_| ".".into());
+        let working_dir = working_dir_path
+            .to_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| "~".to_string());
+        let session_manager = SessionManager::for_working_dir(Some(&working_dir_path));
+        let mut restored_session_notice = None;
+        let mut active_session = None;
+        let mut conversation_history = Arc::new(Vec::new());
+        let mut messages = Vec::new();
+
+        if view == ViewMode::Chat
+            && settings.session.persist_transcript
+            && settings.session.auto_restore_last_session
+        {
+            match session_manager.load_latest() {
+                Ok(Some(session)) => {
+                    conversation_history = Arc::new(session.runtime_history());
+                    messages = Self::display_messages_from_history(&conversation_history);
+                    restored_session_notice = Some(format!("Restored session {}", session.id));
+                    active_session = Some(session);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    restored_session_notice = Some(format!("Session restore failed: {}", error));
+                }
+            }
+        }
+
+        let mut status = if view == ViewMode::Onboarding {
+            "First run detected. Complete onboarding to start coding.".to_string()
+        } else {
+            "Ready.".to_string()
+        };
+        if let Some(notice) = &restored_session_notice {
+            status = notice.clone();
+        }
 
         Self {
             draft: OnboardingDraft::from_settings(&settings),
@@ -122,30 +170,26 @@ impl TerminalState {
             onboarding_focus: 0,
             selected_fallback: 0,
             editing_fallback: None,
-            status: if view == ViewMode::Onboarding {
-                "First run detected. Complete onboarding to start coding.".to_string()
-            } else {
-                "Ready.".to_string()
-            },
+            status,
             input: String::new(),
             should_quit: false,
             confirm_exit_deadline: None,
-            messages: Vec::new(),
-            conversation_history: Arc::new(Vec::new()),
+            messages,
+            conversation_history,
             pending_response: None,
+            pending_approval: None,
             thinking: false,
             initial_prompt,
             spinner_tick: 0,
             last_tick: Instant::now(),
-            working_dir: std::env::current_dir()
-                .ok()
-                .and_then(|p| p.to_str().map(|s| s.to_string()))
-                .unwrap_or_else(|| "~".to_string()),
+            working_dir,
             scroll_offset: 0,
             chat_render_cache: Paragraph::new(Vec::<Line<'static>>::new()),
             chat_render_width: 0,
             chat_render_line_count: 0,
             chat_render_dirty: true,
+            session_manager,
+            active_session,
         }
     }
 
@@ -264,5 +308,115 @@ impl TerminalState {
         } else {
             SPINNER_FRAMES[cycle - pos]
         }
+    }
+
+    pub fn refresh_display_messages(&mut self) {
+        self.messages = Self::display_messages_from_history(&self.conversation_history);
+        self.mark_chat_render_dirty();
+    }
+
+    pub fn replace_history(&mut self, history: Vec<RuntimeMessage>) {
+        self.conversation_history = Arc::new(history);
+        self.refresh_display_messages();
+    }
+
+    pub fn set_pending_approval(&mut self, pending: Option<PendingApproval>) {
+        self.pending_approval = pending.map(|pending| PendingApprovalViewModel {
+            arguments_preview: format_arguments_preview(&pending.tool_call.arguments),
+            pending,
+            focus_index: 0,
+        });
+        self.mark_chat_render_dirty();
+    }
+
+    pub fn persist_current_session(&mut self) -> anyhow::Result<()> {
+        if !self.settings.session.persist_transcript {
+            return Ok(());
+        }
+
+        if self.active_session.is_none() {
+            self.active_session = Some(self.session_manager.create(Some("tui-session"))?);
+        }
+
+        if let Some(session) = &mut self.active_session {
+            self.session_manager
+                .save_transcript(session, &self.conversation_history)?;
+        }
+
+        Ok(())
+    }
+
+    fn display_messages_from_history(history: &[RuntimeMessage]) -> Vec<DisplayMessage> {
+        let mut messages = Vec::new();
+
+        for message in history {
+            match message.role {
+                RuntimeRole::User => messages.push(DisplayMessage {
+                    role: DisplayRole::User,
+                    content: message.content.clone(),
+                }),
+                RuntimeRole::Assistant => {
+                    if !message.content.trim().is_empty() {
+                        messages.push(DisplayMessage {
+                            role: DisplayRole::Assistant,
+                            content: message.content.clone(),
+                        });
+                    }
+                    for tool_call in &message.tool_calls {
+                        messages.push(DisplayMessage {
+                            role: DisplayRole::Tool,
+                            content: format!(
+                                "Tool request: {} {}",
+                                tool_call.name,
+                                format_arguments_preview(&tool_call.arguments)
+                            ),
+                        });
+                    }
+                }
+                RuntimeRole::System => messages.push(DisplayMessage {
+                    role: DisplayRole::System,
+                    content: message.content.clone(),
+                }),
+                RuntimeRole::Tool => {
+                    let tool_result = message.tool_result.as_ref();
+                    let label = tool_result
+                        .map(|result| {
+                            if result.is_error {
+                                format!("Tool error: {}", result.name)
+                            } else {
+                                format!("Tool result: {}", result.name)
+                            }
+                        })
+                        .unwrap_or_else(|| "Tool result".to_string());
+                    messages.push(DisplayMessage {
+                        role: DisplayRole::Tool,
+                        content: format!("{}{}", label, format_tool_body(&message.content)),
+                    });
+                }
+            }
+        }
+
+        messages
+    }
+}
+
+fn format_arguments_preview(arguments: &serde_json::Value) -> String {
+    let pretty = serde_json::to_string_pretty(arguments)
+        .unwrap_or_else(|_| arguments.to_string())
+        .replace('\r', "");
+    let lines = pretty.lines().take(12).collect::<Vec<_>>();
+    let mut preview = lines.join(" ");
+    if preview.len() > 1000 {
+        preview.truncate(1000);
+        preview.push_str("...");
+    }
+    preview
+}
+
+fn format_tool_body(content: &str) -> String {
+    if content.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\n{}", content)
     }
 }

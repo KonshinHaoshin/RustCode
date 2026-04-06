@@ -160,6 +160,8 @@ impl ContextWindow {
                 role: e.role.clone(),
                 content: e.content.clone(),
                 tool_calls: None,
+                tool_call_id: None,
+                name: None,
             })
             .collect()
     }

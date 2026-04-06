@@ -203,6 +203,8 @@ Output only the updated document content, nothing else."#,
             role: "user".to_string(),
             content: prompt,
             tool_calls: None,
+            tool_call_id: None,
+            name: None,
         }];
 
         let response = api_client.chat(&messages).await?;

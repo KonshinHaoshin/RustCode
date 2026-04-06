@@ -8,7 +8,7 @@ use super::{
 use crate::{
     config::{ApiProtocol, ApiProvider, FallbackTarget, Settings},
     onboarding::OnboardingDraft,
-    runtime::{QueryEngine, RuntimeMessage},
+    runtime::{ApprovalAction, QueryEngine, QueryTurnResult, RuntimeMessage, TurnStatus},
 };
 use crossterm::{
     event::{
@@ -151,6 +151,10 @@ impl TerminalApp {
     }
 
     fn handle_chat_key(&mut self, key: KeyEvent) -> bool {
+        if self.state.pending_approval.is_some() {
+            return self.handle_approval_key(key);
+        }
+
         match key.code {
             KeyCode::Enter => {
                 if key.modifiers.contains(KeyModifiers::SHIFT) {
@@ -180,6 +184,41 @@ impl TerminalApp {
                 self.state.input.push(ch);
                 true
             }
+            _ => false,
+        }
+    }
+
+    fn handle_approval_key(&mut self, key: KeyEvent) -> bool {
+        let Some(view_model) = self.state.pending_approval.as_mut() else {
+            return false;
+        };
+
+        match key.code {
+            KeyCode::Left => {
+                view_model.focus_index = view_model.focus_index.saturating_sub(1);
+                true
+            }
+            KeyCode::Right | KeyCode::Tab => {
+                view_model.focus_index = (view_model.focus_index + 1) % 4;
+                true
+            }
+            KeyCode::Esc => {
+                view_model.focus_index = 0;
+                true
+            }
+            KeyCode::Enter => {
+                let selection = match view_model.focus_index {
+                    1 => ApprovalSelection::DenyOnce,
+                    2 => ApprovalSelection::AlwaysAllow,
+                    3 => ApprovalSelection::AlwaysDeny,
+                    _ => ApprovalSelection::AllowOnce,
+                };
+                self.resume_pending_approval(selection)
+            }
+            KeyCode::Char('a') => self.resume_pending_approval(ApprovalSelection::AllowOnce),
+            KeyCode::Char('d') => self.resume_pending_approval(ApprovalSelection::DenyOnce),
+            KeyCode::Char('A') => self.resume_pending_approval(ApprovalSelection::AlwaysAllow),
+            KeyCode::Char('D') => self.resume_pending_approval(ApprovalSelection::AlwaysDeny),
             _ => false,
         }
     }
@@ -425,7 +464,7 @@ impl TerminalApp {
     }
 
     fn submit_prompt(&mut self) -> bool {
-        if self.state.thinking {
+        if self.state.thinking || self.state.pending_approval.is_some() {
             return false;
         }
         let prompt = self.state.input.trim().to_string();
@@ -459,7 +498,7 @@ impl TerminalApp {
                 user_message.clone(),
             ),
             base_history,
-            user_message,
+            user_message: Some(user_message),
         });
 
         true
@@ -470,19 +509,16 @@ impl TerminalApp {
             return false;
         };
         match pending.receiver.try_recv() {
-            Ok(ChatWorkerResult { history, result }) => {
-                self.state.conversation_history = Arc::new(history);
+            Ok(ChatWorkerResult { turn }) => {
                 self.state.thinking = false;
-                match result {
-                    Ok(content) => {
-                        self.state.messages.push(DisplayMessage {
-                            role: DisplayRole::Assistant,
-                            content: content.clone(),
-                        });
-                        self.state.status = "Response received.".to_string();
-                        self.state.scroll_offset = 0;
-                    }
+                match turn {
+                    Ok(turn) => self.apply_turn_result(turn),
                     Err(error) => {
+                        let mut history = (*pending.base_history).clone();
+                        if let Some(user_message) = pending.user_message {
+                            history.push(user_message);
+                        }
+                        self.state.replace_history(history);
                         self.state.messages.push(DisplayMessage {
                             role: DisplayRole::System,
                             content: format!("Request failed: {}", error),
@@ -490,7 +526,6 @@ impl TerminalApp {
                         self.state.status = "Request failed.".to_string();
                     }
                 }
-                self.state.mark_chat_render_dirty();
                 true
             }
             Err(mpsc::TryRecvError::Empty) => {
@@ -499,8 +534,10 @@ impl TerminalApp {
             }
             Err(mpsc::TryRecvError::Disconnected) => {
                 let mut restored_history = (*pending.base_history).clone();
-                restored_history.push(pending.user_message);
-                self.state.conversation_history = Arc::new(restored_history);
+                if let Some(user_message) = pending.user_message {
+                    restored_history.push(user_message);
+                }
+                self.state.replace_history(restored_history);
                 self.state.thinking = false;
                 self.state.status = "Request worker disconnected.".to_string();
                 self.state.messages.push(DisplayMessage {
@@ -512,6 +549,87 @@ impl TerminalApp {
             }
         }
     }
+
+    fn apply_turn_result(&mut self, turn: QueryTurnResult) {
+        self.state.replace_history(turn.history);
+        self.state.scroll_offset = 0;
+
+        match turn.status {
+            TurnStatus::Completed => {
+                self.state.set_pending_approval(None);
+                self.state.status = "Response received.".to_string();
+            }
+            TurnStatus::AwaitingApproval => {
+                self.state.set_pending_approval(turn.pending_approval);
+                self.state.status = "Tool approval required.".to_string();
+            }
+        }
+
+        if let Err(error) = self.state.persist_current_session() {
+            self.state.messages.push(DisplayMessage {
+                role: DisplayRole::System,
+                content: format!("Session save failed: {}", error),
+            });
+            self.state.status = "Session save failed.".to_string();
+        }
+    }
+
+    fn resume_pending_approval(&mut self, selection: ApprovalSelection) -> bool {
+        if self.state.thinking {
+            return false;
+        }
+        let Some(view_model) = self.state.pending_approval.clone() else {
+            return false;
+        };
+
+        match selection {
+            ApprovalSelection::AlwaysAllow => update_local_permission_rules(
+                &mut self.state.settings.permissions.allow_tools,
+                &mut self.state.settings.permissions.deny_tools,
+                &mut self.state.settings.permissions.ask_tools,
+                &view_model.pending.tool_call.name,
+            ),
+            ApprovalSelection::AlwaysDeny => update_local_permission_rules(
+                &mut self.state.settings.permissions.deny_tools,
+                &mut self.state.settings.permissions.allow_tools,
+                &mut self.state.settings.permissions.ask_tools,
+                &view_model.pending.tool_call.name,
+            ),
+            ApprovalSelection::AllowOnce | ApprovalSelection::DenyOnce => {}
+        }
+
+        let action = match selection {
+            ApprovalSelection::AllowOnce => ApprovalAction::AllowOnce(view_model.pending),
+            ApprovalSelection::DenyOnce => ApprovalAction::DenyOnce(view_model.pending),
+            ApprovalSelection::AlwaysAllow => ApprovalAction::AlwaysAllow(view_model.pending),
+            ApprovalSelection::AlwaysDeny => ApprovalAction::AlwaysDeny(view_model.pending),
+        };
+
+        self.state.thinking = true;
+        self.state.status = "Resuming after approval…".to_string();
+        self.state.set_pending_approval(None);
+        self.state.spinner_tick = 0;
+        self.state.last_tick = std::time::Instant::now();
+        let base_history = Arc::clone(&self.state.conversation_history);
+        self.state.pending_response = Some(PendingChatRequest {
+            receiver: spawn_approval_request(
+                self.state.settings.clone(),
+                Arc::clone(&base_history),
+                action,
+            ),
+            base_history,
+            user_message: None,
+        });
+        true
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ApprovalSelection {
+    AllowOnce,
+    DenyOnce,
+    AlwaysAllow,
+    AlwaysDeny,
 }
 
 impl Drop for TerminalApp {
@@ -741,7 +859,37 @@ fn render_chat_lines(
                     ]));
                 }
             }
+            DisplayRole::Tool => {
+                for content_line in message.content.lines() {
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("{} ", GUTTER), Style::default().fg(theme.brand)),
+                        Span::styled(content_line.to_string(), Style::default().fg(theme.muted)),
+                    ]));
+                }
+            }
         }
+        lines.push(Line::default());
+    }
+
+    if let Some(approval) = &state.pending_approval {
+        lines.push(Line::from(Span::styled(
+            "Approval required",
+            Style::default()
+                .fg(theme.brand)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(format!(
+            "Tool: {}",
+            approval.pending.tool_call.name
+        )));
+        lines.push(Line::from(format!("Reason: {}", approval.pending.reason)));
+        for preview_line in approval.arguments_preview.lines() {
+            lines.push(Line::from(format!("Args: {}", preview_line)));
+        }
+        lines.push(Line::from(render_approval_buttons(
+            approval.focus_index,
+            theme,
+        )));
         lines.push(Line::default());
     }
 
@@ -754,7 +902,18 @@ fn render_prompt(
     theme: TerminalTheme,
     state: &TerminalState,
 ) {
-    let mut lines: Vec<Line<'static>> = if state.input.is_empty() {
+    let mut lines: Vec<Line<'static>> = if state.pending_approval.is_some() {
+        vec![
+            Line::from(Span::styled(
+                "Approval pending. Use a/d/A/D or Enter to continue.",
+                theme.muted_style(),
+            )),
+            Line::from(Span::styled(
+                "Chat input is paused until this tool decision is handled.",
+                theme.muted_style(),
+            )),
+        ]
+    } else if state.input.is_empty() {
         vec![Line::from(Span::styled(
             "What do you want to do?",
             theme.muted_style(),
@@ -789,6 +948,26 @@ fn render_prompt(
             .wrap(ratatui::widgets::Wrap { trim: false }),
         area,
     );
+}
+
+fn render_approval_buttons(focus_index: usize, theme: TerminalTheme) -> Vec<Span<'static>> {
+    const LABELS: [&str; 4] = ["Allow Once", "Deny Once", "Always Allow", "Always Deny"];
+    let mut spans = Vec::new();
+    for (index, label) in LABELS.into_iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw(" "));
+        }
+        let style = if index == focus_index {
+            Style::default()
+                .fg(theme.panel)
+                .bg(theme.brand)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.muted)
+        };
+        spans.push(Span::styled(format!("[{}]", label), style));
+    }
+    spans
 }
 
 fn render_status_line(
@@ -1060,32 +1239,61 @@ fn spawn_chat_request(
             });
 
             match result {
-                Ok(result) => {
-                    let assistant_text = result.assistant_text().unwrap_or_default().to_string();
-                    Ok(ChatWorkerResult {
-                        history: result.history,
-                        result: Ok(assistant_text),
-                    })
-                }
+                Ok(turn) => Ok(ChatWorkerResult { turn: Ok(turn) }),
                 Err(error) => {
-                    let mut history = (*base_history).clone();
-                    history.push(fallback_user_message);
-                    Ok(ChatWorkerResult {
-                        history,
-                        result: Err(error),
-                    })
+                    let _ = fallback_user_message;
+                    Err(error)
                 }
             }
         })()
         .unwrap_or_else(|error| {
-            let mut history = (*base_history).clone();
-            history.push(original_user_message);
-            ChatWorkerResult {
-                history,
-                result: Err(error),
-            }
+            let _ = original_user_message;
+            ChatWorkerResult { turn: Err(error) }
         });
         let _ = sender.send(payload);
     });
     receiver
+}
+
+fn spawn_approval_request(
+    settings: Settings,
+    base_history: Arc<Vec<RuntimeMessage>>,
+    action: ApprovalAction,
+) -> mpsc::Receiver<ChatWorkerResult> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let payload = (|| -> anyhow::Result<ChatWorkerResult> {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            let result = runtime.block_on(async {
+                let engine = QueryEngine::new(settings);
+                engine.resume_after_approval(&base_history, action).await
+            });
+
+            match result {
+                Ok(turn) => Ok(ChatWorkerResult { turn: Ok(turn) }),
+                Err(error) => Err(error),
+            }
+        })()
+        .unwrap_or_else(|error| ChatWorkerResult { turn: Err(error) });
+        let _ = sender.send(payload);
+    });
+    receiver
+}
+
+fn update_local_permission_rules(
+    target_rules: &mut Vec<String>,
+    remove_from: &mut Vec<String>,
+    ask_rules: &mut Vec<String>,
+    tool_name: &str,
+) {
+    remove_from.retain(|rule| !rule.eq_ignore_ascii_case(tool_name));
+    ask_rules.retain(|rule| !rule.eq_ignore_ascii_case(tool_name));
+    if !target_rules
+        .iter()
+        .any(|rule| rule.eq_ignore_ascii_case(tool_name))
+    {
+        target_rules.push(tool_name.to_string());
+    }
 }

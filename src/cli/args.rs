@@ -112,6 +112,11 @@ impl Cli {
     async fn run_query(&self, state: crate::state::AppState, prompt: String) -> anyhow::Result<()> {
         let engine = crate::runtime::QueryEngine::new(state.settings.clone());
         let response = engine.submit_text_turn(&[], prompt).await?;
+        if response.status == crate::runtime::TurnStatus::AwaitingApproval {
+            return Err(anyhow::anyhow!(
+                "Non-interactive query cannot approve tools. Re-run in TUI."
+            ));
+        }
         if let Some(content) = response.assistant_text() {
             if !content.is_empty() {
                 println!("{}", content);

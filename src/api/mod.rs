@@ -1,6 +1,9 @@
 //! API Module - Multi-provider API client with fallback support
 
-use crate::config::{ApiProtocol, ResolvedApiTarget, Settings};
+use crate::{
+    config::{ApiProtocol, ResolvedApiTarget, Settings},
+    tools_runtime::ToolDefinition,
+};
 use chrono::Utc;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -63,8 +66,24 @@ impl ApiClient {
             .collect()
     }
 
+    fn request_targets_for_tools(&self, requires_tool_calling: bool) -> Vec<ResolvedApiTarget> {
+        let mut targets = self.request_targets();
+        if requires_tool_calling {
+            targets.sort_by_key(|target| !target.supports_tool_calling());
+        }
+        targets
+    }
+
     pub async fn chat(&self, messages: &[ChatMessage]) -> anyhow::Result<ChatResponse> {
-        let targets = self.request_targets();
+        self.chat_with_tools(messages, &[]).await
+    }
+
+    pub async fn chat_with_tools(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolDefinition],
+    ) -> anyhow::Result<ChatResponse> {
+        let targets = self.request_targets_for_tools(!tools.is_empty());
         let total_targets = targets.len();
         let mut failures = Vec::new();
 
@@ -78,7 +97,7 @@ impl ApiClient {
                 );
             }
 
-            match self.chat_once(target, messages).await {
+            match self.chat_once(target, messages, tools).await {
                 Ok(response) => {
                     if index > 0 {
                         eprintln!("Fallback succeeded with {}", target.display_name());
@@ -105,7 +124,7 @@ impl ApiClient {
         messages: Vec<ChatMessage>,
     ) -> anyhow::Result<reqwest::Response> {
         let target = self.settings.api.active_target(&self.settings.model);
-        self.send_request(&target, &messages, true)
+        self.send_request(&target, &messages, &[], true)
             .await
             .map_err(|error| anyhow::anyhow!(error.message))
     }
@@ -114,8 +133,20 @@ impl ApiClient {
         &self,
         target: &ResolvedApiTarget,
         messages: &[ChatMessage],
+        tools: &[ToolDefinition],
     ) -> Result<ChatResponse, AttemptFailure> {
-        let response = self.send_request(target, messages, false).await?;
+        let response = self
+            .send_request(
+                target,
+                messages,
+                if target.supports_tool_calling() {
+                    tools
+                } else {
+                    &[]
+                },
+                false,
+            )
+            .await?;
         let status = response.status();
 
         match target.protocol {
@@ -142,11 +173,18 @@ impl ApiClient {
         &self,
         target: &ResolvedApiTarget,
         messages: &[ChatMessage],
+        tools: &[ToolDefinition],
         stream: bool,
     ) -> Result<reqwest::Response, AttemptFailure> {
         let response = match target.protocol {
-            ApiProtocol::OpenAi => self.send_openai_request(target, messages, stream).await,
-            ApiProtocol::Anthropic => self.send_anthropic_request(target, messages, stream).await,
+            ApiProtocol::OpenAi => {
+                self.send_openai_request(target, messages, tools, stream)
+                    .await
+            }
+            ApiProtocol::Anthropic => {
+                self.send_anthropic_request(target, messages, tools, stream)
+                    .await
+            }
         }
         .map_err(|error| AttemptFailure {
             message: error.to_string(),
@@ -169,6 +207,7 @@ impl ApiClient {
         &self,
         target: &ResolvedApiTarget,
         messages: &[ChatMessage],
+        tools: &[ToolDefinition],
         stream: bool,
     ) -> anyhow::Result<reqwest::Response> {
         let request = OpenAiChatRequest {
@@ -177,6 +216,13 @@ impl ApiClient {
             max_tokens: self.settings.api.max_tokens,
             stream,
             temperature: 0.7,
+            tools: (!tools.is_empty()).then(|| {
+                tools
+                    .iter()
+                    .map(|tool| OpenAiToolDefinition::from(tool.clone()))
+                    .collect()
+            }),
+            tool_choice: (!tools.is_empty()).then(|| "auto".to_string()),
         };
 
         let url = build_api_url(&target.base_url, "/v1/chat/completions");
@@ -196,6 +242,7 @@ impl ApiClient {
         &self,
         target: &ResolvedApiTarget,
         messages: &[ChatMessage],
+        tools: &[ToolDefinition],
         stream: bool,
     ) -> anyhow::Result<reqwest::Response> {
         let (system, anthropic_messages) = Self::to_anthropic_messages(messages);
@@ -205,6 +252,12 @@ impl ApiClient {
             messages: anthropic_messages,
             system,
             stream,
+            tools: (!tools.is_empty()).then(|| {
+                tools
+                    .iter()
+                    .map(|tool| AnthropicToolDefinition::from(tool.clone()))
+                    .collect()
+            }),
         };
 
         let url = build_api_url(&target.base_url, "/v1/messages");
@@ -233,8 +286,9 @@ impl ApiClient {
             match message.role.as_str() {
                 "system" => system_messages.push(message.content.clone()),
                 "assistant" => anthropic_messages
-                    .push(AnthropicMessage::from_text("assistant", &message.content)),
-                _ => anthropic_messages.push(AnthropicMessage::from_text("user", &message.content)),
+                    .push(AnthropicMessage::from_chat_message("assistant", message)),
+                "tool" => anthropic_messages.push(AnthropicMessage::tool_result(message)),
+                _ => anthropic_messages.push(AnthropicMessage::from_chat_message("user", message)),
             }
         }
 
@@ -263,9 +317,14 @@ impl ApiClient {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
+    #[serde(default)]
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 impl ChatMessage {
@@ -274,6 +333,8 @@ impl ChatMessage {
             role: "user".to_string(),
             content: content.into(),
             tool_calls: None,
+            tool_call_id: None,
+            name: None,
         }
     }
 
@@ -282,6 +343,8 @@ impl ChatMessage {
             role: "assistant".to_string(),
             content: content.into(),
             tool_calls: None,
+            tool_call_id: None,
+            name: None,
         }
     }
 
@@ -290,6 +353,8 @@ impl ChatMessage {
             role: "system".to_string(),
             content: content.into(),
             tool_calls: None,
+            tool_call_id: None,
+            name: None,
         }
     }
 }
@@ -301,6 +366,37 @@ struct OpenAiChatRequest {
     max_tokens: usize,
     stream: bool,
     temperature: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<OpenAiToolDefinition>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OpenAiToolDefinition {
+    #[serde(rename = "type")]
+    kind: String,
+    function: OpenAiFunctionDefinition,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OpenAiFunctionDefinition {
+    name: String,
+    description: String,
+    parameters: serde_json::Value,
+}
+
+impl From<ToolDefinition> for OpenAiToolDefinition {
+    fn from(value: ToolDefinition) -> Self {
+        Self {
+            kind: "function".to_string(),
+            function: OpenAiFunctionDefinition {
+                name: value.name,
+                description: value.description,
+                parameters: value.input_schema,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -334,6 +430,8 @@ struct AnthropicRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     system: Option<String>,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<AnthropicToolDefinition>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -343,10 +441,35 @@ struct AnthropicMessage {
 }
 
 impl AnthropicMessage {
-    fn from_text(role: &str, text: &str) -> Self {
+    fn from_chat_message(role: &str, message: &ChatMessage) -> Self {
+        let mut content = Vec::new();
+        if !message.content.is_empty() {
+            content.push(AnthropicContentBlock::text(&message.content));
+        }
+        if let Some(tool_calls) = &message.tool_calls {
+            content.extend(
+                tool_calls
+                    .iter()
+                    .filter_map(anthropic_tool_use_block_from_api_value),
+            );
+        }
+        if content.is_empty() {
+            content.push(AnthropicContentBlock::text(""));
+        }
+
         Self {
             role: role.to_string(),
-            content: vec![AnthropicContentBlock::text(text)],
+            content,
+        }
+    }
+
+    fn tool_result(message: &ChatMessage) -> Self {
+        Self {
+            role: "user".to_string(),
+            content: vec![AnthropicContentBlock::tool_result(
+                message.tool_call_id.as_deref().unwrap_or_default(),
+                &message.content,
+            )],
         }
     }
 }
@@ -357,6 +480,18 @@ struct AnthropicContentBlock {
     block_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_use_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<Vec<AnthropicToolResultContentBlock>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    is_error: Option<bool>,
 }
 
 impl AnthropicContentBlock {
@@ -364,6 +499,71 @@ impl AnthropicContentBlock {
         Self {
             block_type: "text".to_string(),
             text: Some(text.to_string()),
+            id: None,
+            name: None,
+            input: None,
+            tool_use_id: None,
+            content: None,
+            is_error: None,
+        }
+    }
+
+    fn tool_use(id: String, name: String, input: serde_json::Value) -> Self {
+        Self {
+            block_type: "tool_use".to_string(),
+            text: None,
+            id: Some(id),
+            name: Some(name),
+            input: Some(input),
+            tool_use_id: None,
+            content: None,
+            is_error: None,
+        }
+    }
+
+    fn tool_result(tool_use_id: &str, text: &str) -> Self {
+        Self {
+            block_type: "tool_result".to_string(),
+            text: None,
+            id: None,
+            name: None,
+            input: None,
+            tool_use_id: Some(tool_use_id.to_string()),
+            content: Some(vec![AnthropicToolResultContentBlock::text(text)]),
+            is_error: Some(false),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AnthropicToolResultContentBlock {
+    #[serde(rename = "type")]
+    block_type: String,
+    text: String,
+}
+
+impl AnthropicToolResultContentBlock {
+    fn text(text: &str) -> Self {
+        Self {
+            block_type: "text".to_string(),
+            text: text.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AnthropicToolDefinition {
+    name: String,
+    description: String,
+    input_schema: serde_json::Value,
+}
+
+impl From<ToolDefinition> for AnthropicToolDefinition {
+    fn from(value: ToolDefinition) -> Self {
+        Self {
+            name: value.name,
+            description: value.description,
+            input_schema: value.input_schema,
         }
     }
 }
@@ -407,6 +607,15 @@ impl ChatResponse {
             .filter_map(|block| block.text.clone())
             .collect::<Vec<_>>()
             .join("");
+        let tool_calls = response
+            .content
+            .iter()
+            .filter_map(anthropic_tool_use_block_to_api_value)
+            .collect::<Vec<_>>();
+        let mut message = ChatMessage::assistant(content);
+        if !tool_calls.is_empty() {
+            message.tool_calls = Some(tool_calls);
+        }
 
         Self {
             id: response.id,
@@ -415,7 +624,7 @@ impl ChatResponse {
             model: response.model,
             choices: vec![Choice {
                 index: 0,
-                message: ChatMessage::assistant(content),
+                message,
                 finish_reason: response.stop_reason,
             }],
             usage: response.usage.map(|usage| Usage {
@@ -464,6 +673,42 @@ pub struct Delta {
 }
 
 pub type AnthropicClient = ApiClient;
+
+fn anthropic_tool_use_block_from_api_value(
+    value: &serde_json::Value,
+) -> Option<AnthropicContentBlock> {
+    let id = value.get("id")?.as_str()?.to_string();
+    let function = value.get("function")?;
+    let name = function.get("name")?.as_str()?.to_string();
+    let raw_arguments = function.get("arguments")?;
+    let input = match raw_arguments {
+        serde_json::Value::String(text) => serde_json::from_str(text).unwrap_or_else(|_| {
+            serde_json::json!({
+                "raw": text
+            })
+        }),
+        other => other.clone(),
+    };
+
+    Some(AnthropicContentBlock::tool_use(id, name, input))
+}
+
+fn anthropic_tool_use_block_to_api_value(
+    block: &AnthropicContentBlock,
+) -> Option<serde_json::Value> {
+    if block.block_type != "tool_use" {
+        return None;
+    }
+
+    Some(serde_json::json!({
+        "id": block.id.as_ref()?,
+        "type": "function",
+        "function": {
+            "name": block.name.as_ref()?,
+            "arguments": serde_json::to_string(block.input.as_ref()?).unwrap_or_else(|_| "{}".to_string())
+        }
+    }))
+}
 
 fn build_api_url(base_url: &str, endpoint_path: &str) -> String {
     let trimmed = base_url.trim_end_matches('/');

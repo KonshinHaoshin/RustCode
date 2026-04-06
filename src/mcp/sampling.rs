@@ -169,6 +169,8 @@ impl SamplingManager {
                 role: m.role.clone(),
                 content: m.content.text.clone(),
                 tool_calls: None,
+                tool_call_id: None,
+                name: None,
             })
             .collect();
 

@@ -4,5 +4,5 @@ pub mod results;
 pub mod types;
 
 pub use query_engine::QueryEngine;
-pub use results::{QueryTurnResult, RuntimeUsage};
-pub use types::{RuntimeMessage, RuntimeRole};
+pub use results::{ApprovalAction, PendingApproval, QueryTurnResult, RuntimeUsage, TurnStatus};
+pub use types::{RuntimeMessage, RuntimeRole, RuntimeToolCall, RuntimeToolResult};

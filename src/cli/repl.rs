@@ -89,6 +89,15 @@ impl Repl {
 
         match response {
             Ok(response) => {
+                if response.status == crate::runtime::TurnStatus::AwaitingApproval {
+                    println!(
+                        "This action requires approval. Use the TUI to approve tool execution."
+                    );
+                    println!();
+                    self.conversation_history = response.history;
+                    return Ok(());
+                }
+
                 if let Some(content) = response.assistant_text() {
                     if !content.is_empty() {
                         println!("{}", content);
@@ -178,6 +187,7 @@ impl Repl {
                     RuntimeRole::User => "👤 用户",
                     RuntimeRole::Assistant => "🤖 助手",
                     RuntimeRole::System => "⚙️ 系统",
+                    RuntimeRole::Tool => "🛠️ 工具",
                 };
                 let preview: String = msg.content.chars().take(50).collect();
                 let suffix = if msg.content.len() > 50 { "..." } else { "" };

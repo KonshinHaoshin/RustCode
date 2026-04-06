@@ -208,11 +208,15 @@ impl VoiceService {
                 role: "system".to_string(),
                 content: prompt.to_string(),
                 tool_calls: None,
+                tool_call_id: None,
+                name: None,
             },
             crate::api::ChatMessage {
                 role: "user".to_string(),
                 content: format!("[Audio data: {} bytes]", audio_data.len()),
                 tool_calls: None,
+                tool_call_id: None,
+                name: None,
             },
         ];
 
