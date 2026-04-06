@@ -6,7 +6,7 @@ use crate::{
     session::{Session, SessionInfo, SessionManager, SessionStatus},
     terminal::theme::SPINNER_FRAMES,
 };
-use ratatui::{text::Line, widgets::Paragraph};
+use ratatui::{layout::Rect, text::Line, widgets::Paragraph};
 use std::{
     sync::{mpsc::Receiver, Arc},
     time::{Duration, Instant},
@@ -26,6 +26,48 @@ pub enum DisplayRole {
 pub struct DisplayMessage {
     pub role: DisplayRole,
     pub content: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectionPoint {
+    pub line: usize,
+    pub column: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextSelection {
+    pub anchor: SelectionPoint,
+    pub focus: SelectionPoint,
+}
+
+impl TextSelection {
+    pub fn normalized(self) -> (SelectionPoint, SelectionPoint) {
+        if self.anchor.line < self.focus.line
+            || (self.anchor.line == self.focus.line && self.anchor.column <= self.focus.column)
+        {
+            (self.anchor, self.focus)
+        } else {
+            (self.focus, self.anchor)
+        }
+    }
+
+    pub fn is_single_point(self) -> bool {
+        self.anchor == self.focus
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionMode {
+    Char,
+    Word,
+    Line,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectionClickState {
+    pub point: SelectionPoint,
+    pub count: u8,
+    pub at: Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -142,6 +184,13 @@ pub struct TerminalState {
     pub chat_render_width: u16,
     pub chat_render_line_count: u16,
     pub chat_render_dirty: bool,
+    pub chat_plain_lines: Vec<String>,
+    pub chat_area: Rect,
+    pub chat_scroll_row: usize,
+    pub selection: Option<TextSelection>,
+    pub selection_mode: SelectionMode,
+    pub selection_dragging: bool,
+    pub last_selection_click: Option<SelectionClickState>,
     pub session_manager: SessionManager,
     pub active_session: Option<Session>,
     pub active_session_id: Option<String>,
@@ -242,6 +291,13 @@ impl TerminalState {
             chat_render_width: 0,
             chat_render_line_count: 0,
             chat_render_dirty: true,
+            chat_plain_lines: Vec::new(),
+            chat_area: Rect::default(),
+            chat_scroll_row: 0,
+            selection: None,
+            selection_mode: SelectionMode::Char,
+            selection_dragging: false,
+            last_selection_click: None,
             session_manager,
             active_session,
             active_session_id,
@@ -373,6 +429,7 @@ impl TerminalState {
 
     pub fn replace_history(&mut self, history: Vec<RuntimeMessage>) {
         self.conversation_history = Arc::new(history);
+        self.clear_selection();
         self.refresh_display_messages();
     }
 
@@ -387,6 +444,7 @@ impl TerminalState {
         self.last_usage_total = None;
         self.scroll_offset = 0;
         self.thinking = false;
+        self.clear_selection();
     }
 
     pub fn set_pending_approval(&mut self, pending: Option<PendingApproval>) {
@@ -459,7 +517,85 @@ impl TerminalState {
         self.resume_picker = None;
         self.permissions_view = None;
         self.last_usage_total = None;
+        self.clear_selection();
         self.mark_chat_render_dirty();
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
+        self.selection_mode = SelectionMode::Char;
+        self.selection_dragging = false;
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.selection
+            .is_some_and(|selection| !selection.is_single_point())
+    }
+
+    pub fn begin_selection(
+        &mut self,
+        anchor: SelectionPoint,
+        focus: SelectionPoint,
+        mode: SelectionMode,
+    ) {
+        self.selection = Some(TextSelection { anchor, focus });
+        self.selection_mode = mode;
+        self.selection_dragging = true;
+        self.mark_chat_render_dirty();
+    }
+
+    pub fn update_selection(&mut self, point: SelectionPoint) {
+        if let Some(selection) = self.selection.as_mut() {
+            selection.focus = point;
+            self.mark_chat_render_dirty();
+        }
+    }
+
+    pub fn finish_selection(&mut self, point: SelectionPoint) {
+        if let Some(selection) = self.selection.as_mut() {
+            selection.focus = point;
+        }
+        self.selection_dragging = false;
+        self.mark_chat_render_dirty();
+    }
+
+    pub fn selection_text(&self) -> Option<String> {
+        let selection = self.selection?;
+        let (start, end) = selection.normalized();
+        if start == end {
+            return None;
+        }
+
+        let mut parts = Vec::new();
+        for line_index in start.line..=end.line {
+            let line = self.chat_plain_lines.get(line_index)?;
+            let chars: Vec<char> = line.chars().collect();
+            if chars.is_empty() {
+                parts.push(String::new());
+                continue;
+            }
+
+            let start_column = if line_index == start.line {
+                start.column.min(chars.len().saturating_sub(1))
+            } else {
+                0
+            };
+            let end_column = if line_index == end.line {
+                end.column.min(chars.len().saturating_sub(1))
+            } else {
+                chars.len().saturating_sub(1)
+            };
+
+            if start_column > end_column {
+                parts.push(String::new());
+                continue;
+            }
+
+            let text = chars[start_column..=end_column].iter().collect::<String>();
+            parts.push(text);
+        }
+
+        Some(parts.join("\n"))
     }
 
     pub fn current_session_status(&self) -> SessionStatus {
@@ -544,5 +680,27 @@ fn format_tool_body(content: &str) -> String {
         String::new()
     } else {
         format!("\n{}", content)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selection_text_collects_multiline_range() {
+        let settings = Settings::default();
+        let mut state = TerminalState::new(settings, None);
+        state.chat_plain_lines = vec![
+            "hello world".to_string(),
+            "second line".to_string(),
+            "tail".to_string(),
+        ];
+        state.selection = Some(TextSelection {
+            anchor: SelectionPoint { line: 0, column: 6 },
+            focus: SelectionPoint { line: 1, column: 5 },
+        });
+
+        assert_eq!(state.selection_text().as_deref(), Some("world\nsecond"));
     }
 }

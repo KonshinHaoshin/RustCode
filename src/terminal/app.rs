@@ -2,7 +2,8 @@ use super::{
     state::{
         ChatWorkerResult, DisplayMessage, DisplayRole, FallbackField, OnboardingStep,
         PendingChatRequest, PermissionSection, PermissionsViewState, PrimaryField,
-        ResumePickerState, TerminalState, ViewMode,
+        ResumePickerState, SelectionClickState, SelectionMode, SelectionPoint, TerminalState,
+        ViewMode,
     },
     theme::{TerminalTheme, BLACK_CIRCLE, GUTTER},
 };
@@ -22,7 +23,7 @@ use crate::{
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-        KeyModifiers, MouseEventKind,
+        KeyModifiers, MouseButton, MouseEventKind,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -36,10 +37,11 @@ use ratatui::{
     Terminal,
 };
 use std::{
-    io::{stdout, Stdout},
+    io::{stdout, Stdout, Write},
+    process::{Command, Stdio},
     sync::{mpsc, Arc},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 pub struct TerminalApp {
@@ -130,6 +132,19 @@ impl TerminalApp {
                     return Ok(false);
                 }
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                    if self.state.view == ViewMode::Chat && self.state.has_selection() {
+                        match copy_text_to_clipboard(
+                            self.state.selection_text().unwrap_or_default(),
+                        ) {
+                            Ok(()) => {
+                                self.state.status = "Selection copied to clipboard.".to_string();
+                            }
+                            Err(error) => {
+                                self.state.status = format!("Clipboard copy failed: {}", error);
+                            }
+                        }
+                        return Ok(true);
+                    }
                     self.state.request_exit();
                     return Ok(true);
                 }
@@ -140,6 +155,68 @@ impl TerminalApp {
             }
             Event::Mouse(mouse) => {
                 if self.state.view == ViewMode::Chat {
+                    if let Some(point) =
+                        selection_point_for_mouse(&self.state, mouse.column, mouse.row)
+                    {
+                        match mouse.kind {
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                let click_count = next_click_count(
+                                    self.state.last_selection_click,
+                                    point,
+                                    Instant::now(),
+                                );
+                                self.state.last_selection_click = Some(SelectionClickState {
+                                    point,
+                                    count: click_count,
+                                    at: Instant::now(),
+                                });
+                                let (anchor, focus, mode) =
+                                    selection_seed_for_click(&self.state, point, click_count);
+                                self.state.begin_selection(anchor, focus, mode);
+                                return Ok(true);
+                            }
+                            MouseEventKind::Drag(MouseButton::Left) => {
+                                if self.state.selection_dragging {
+                                    let focus = expand_selection_focus(
+                                        &self.state,
+                                        self.state.selection_mode,
+                                        point,
+                                    );
+                                    self.state.update_selection(focus);
+                                    return Ok(true);
+                                }
+                            }
+                            MouseEventKind::Up(MouseButton::Left) => {
+                                if self.state.selection_dragging {
+                                    let focus = expand_selection_focus(
+                                        &self.state,
+                                        self.state.selection_mode,
+                                        point,
+                                    );
+                                    self.state.finish_selection(focus);
+                                    if self.state.has_selection() {
+                                        match copy_text_to_clipboard(
+                                            self.state.selection_text().unwrap_or_default(),
+                                        ) {
+                                            Ok(()) => {
+                                                self.state.status =
+                                                    "Selection copied to clipboard.".to_string();
+                                            }
+                                            Err(error) => {
+                                                self.state.status =
+                                                    format!("Clipboard copy failed: {}", error);
+                                            }
+                                        }
+                                    } else {
+                                        self.state.clear_selection();
+                                    }
+                                    return Ok(true);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+
                     let old_offset = self.state.scroll_offset;
                     match mouse.kind {
                         MouseEventKind::ScrollDown => {
@@ -193,6 +270,11 @@ impl TerminalApp {
                 true
             }
             KeyCode::Esc => {
+                if self.state.has_selection() {
+                    self.state.clear_selection();
+                    self.state.mark_chat_render_dirty();
+                    return true;
+                }
                 let had_input = !self.state.input.is_empty();
                 self.state.input.clear();
                 had_input
@@ -1280,6 +1362,8 @@ fn render_chat(
     let max_scroll = total_lines.saturating_sub(visible);
     let scroll_up = state.scroll_offset as u16;
     let scroll_row = max_scroll.saturating_sub(scroll_up);
+    state.chat_area = area;
+    state.chat_scroll_row = scroll_row as usize;
 
     let paragraph = std::mem::take(&mut state.chat_render_cache).scroll((scroll_row, 0));
     frame.render_widget(&paragraph, area);
@@ -1288,14 +1372,65 @@ fn render_chat(
 
 fn ensure_chat_cache(state: &mut TerminalState, theme: TerminalTheme, width: u16) {
     if state.chat_render_dirty || state.chat_render_width != width {
-        let lines = render_chat_lines(state, theme, width);
-        let paragraph = Paragraph::new(lines)
-            .alignment(Alignment::Left)
-            .wrap(ratatui::widgets::Wrap { trim: false });
-        state.chat_render_line_count = paragraph.line_count(width) as u16;
+        let rendered_lines = render_chat_lines(state, theme, width);
+        state.chat_plain_lines = rendered_lines
+            .iter()
+            .map(|line| line.text.clone())
+            .collect();
+        let lines = rendered_lines
+            .iter()
+            .enumerate()
+            .map(|(index, line)| line.to_line(selection_range_for_line(state, index), theme))
+            .collect::<Vec<_>>();
+        let paragraph = Paragraph::new(lines).alignment(Alignment::Left);
+        state.chat_render_line_count = rendered_lines.len() as u16;
         state.chat_render_cache = paragraph;
         state.chat_render_width = width;
         state.chat_render_dirty = false;
+    }
+}
+
+#[derive(Clone)]
+struct ChatRenderLine {
+    text: String,
+    style: Style,
+}
+
+impl ChatRenderLine {
+    fn to_line(&self, selection: Option<(usize, usize)>, theme: TerminalTheme) -> Line<'static> {
+        if let Some((start, end)) = selection {
+            let chars = self.text.chars().collect::<Vec<_>>();
+            if chars.is_empty() || start >= chars.len() {
+                return Line::from(Span::styled(self.text.clone(), self.style));
+            }
+
+            let end = end.min(chars.len().saturating_sub(1));
+            let before = chars[..start].iter().collect::<String>();
+            let selected = chars[start..=end].iter().collect::<String>();
+            let after = if end + 1 < chars.len() {
+                chars[end + 1..].iter().collect::<String>()
+            } else {
+                String::new()
+            };
+
+            let mut spans = Vec::new();
+            if !before.is_empty() {
+                spans.push(Span::styled(before, self.style));
+            }
+            spans.push(Span::styled(
+                selected,
+                self.style
+                    .bg(theme.shimmer)
+                    .fg(ratatui::style::Color::Black)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            if !after.is_empty() {
+                spans.push(Span::styled(after, self.style));
+            }
+            Line::from(spans)
+        } else {
+            Line::from(Span::styled(self.text.clone(), self.style))
+        }
     }
 }
 
@@ -1303,9 +1438,16 @@ fn render_chat_lines(
     state: &TerminalState,
     theme: TerminalTheme,
     width: u16,
-) -> Vec<Line<'static>> {
+) -> Vec<ChatRenderLine> {
     if state.messages.is_empty() {
-        return theme.empty_chat_lines(width, &state.working_dir);
+        return theme
+            .empty_chat_lines(width, &state.working_dir)
+            .into_iter()
+            .map(|line| ChatRenderLine {
+                text: line_to_plain_text(&line),
+                style: Style::default().fg(theme.text),
+            })
+            .collect();
     }
 
     let mut lines = Vec::new();
@@ -1314,112 +1456,442 @@ fn render_chat_lines(
         match message.role {
             DisplayRole::User => {
                 for content_line in message.content.lines() {
-                    lines.push(Line::from(Span::styled(
+                    push_wrapped_line(
+                        &mut lines,
                         format!(" {}", content_line),
                         Style::default().fg(theme.text).bg(theme.user_msg_bg),
-                    )));
+                        width,
+                    );
                 }
                 if message.content.is_empty() {
-                    lines.push(Line::from(Span::styled(
-                        " ",
+                    push_wrapped_line(
+                        &mut lines,
+                        " ".to_string(),
                         Style::default().bg(theme.user_msg_bg),
-                    )));
+                        width,
+                    );
                 }
             }
             DisplayRole::Assistant => {
                 for content_line in message.content.lines() {
-                    lines.push(Line::from(vec![
-                        Span::styled(format!("{} ", GUTTER), Style::default().fg(theme.subtle)),
-                        Span::styled(content_line.to_string(), Style::default().fg(theme.text)),
-                    ]));
+                    push_wrapped_line(
+                        &mut lines,
+                        format!("{} {}", GUTTER, content_line),
+                        Style::default().fg(theme.text),
+                        width,
+                    );
                 }
                 if message.content.is_empty() {
-                    lines.push(Line::from(Span::styled(
+                    push_wrapped_line(
+                        &mut lines,
                         format!("{} ", GUTTER),
                         Style::default().fg(theme.subtle),
-                    )));
+                        width,
+                    );
                 }
             }
             DisplayRole::System => {
                 for content_line in message.content.lines() {
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            format!("{} ", BLACK_CIRCLE),
-                            Style::default().fg(theme.error),
-                        ),
-                        Span::styled(content_line.to_string(), Style::default().fg(theme.error)),
-                    ]));
+                    push_wrapped_line(
+                        &mut lines,
+                        format!("{} {}", BLACK_CIRCLE, content_line),
+                        Style::default().fg(theme.error),
+                        width,
+                    );
                 }
             }
             DisplayRole::Tool => {
                 for content_line in message.content.lines() {
-                    lines.push(Line::from(vec![
-                        Span::styled(format!("{} ", GUTTER), Style::default().fg(theme.brand)),
-                        Span::styled(content_line.to_string(), Style::default().fg(theme.muted)),
-                    ]));
+                    push_wrapped_line(
+                        &mut lines,
+                        format!("{} {}", GUTTER, content_line),
+                        Style::default().fg(theme.muted),
+                        width,
+                    );
                 }
             }
         }
-        lines.push(Line::default());
+        lines.push(ChatRenderLine {
+            text: String::new(),
+            style: Style::default(),
+        });
     }
 
     if let Some(approval) = &state.pending_approval {
-        lines.push(Line::from(Span::styled(
-            "Approval required",
+        push_wrapped_line(
+            &mut lines,
+            "Approval required".to_string(),
             Style::default()
                 .fg(theme.brand)
                 .add_modifier(Modifier::BOLD),
-        )));
+            width,
+        );
         if matches!(
             approval.origin,
             super::state::PendingApprovalOrigin::RestoredSession
         ) {
-            lines.push(Line::from(Span::styled(
-                "Restored from previous session.",
+            push_wrapped_line(
+                &mut lines,
+                "Restored from previous session.".to_string(),
                 theme.muted_style(),
-            )));
+                width,
+            );
         }
-        lines.push(Line::from(format!(
-            "Tool: {}",
-            approval.pending.tool_call.name
-        )));
-        lines.push(Line::from(format!("Reason: {}", approval.pending.reason)));
+        push_wrapped_line(
+            &mut lines,
+            format!("Tool: {}", approval.pending.tool_call.name),
+            Style::default().fg(theme.text),
+            width,
+        );
+        push_wrapped_line(
+            &mut lines,
+            format!("Reason: {}", approval.pending.reason),
+            Style::default().fg(theme.text),
+            width,
+        );
         for preview_line in approval.arguments_preview.lines() {
-            lines.push(Line::from(format!("Args: {}", preview_line)));
+            push_wrapped_line(
+                &mut lines,
+                format!("Args: {}", preview_line),
+                Style::default().fg(theme.text),
+                width,
+            );
         }
-        lines.push(Line::from(render_approval_buttons(
-            approval.focus_index,
-            theme,
-        )));
-        lines.push(Line::default());
+        push_wrapped_line(
+            &mut lines,
+            line_to_plain_text(&Line::from(render_approval_buttons(
+                approval.focus_index,
+                theme,
+            ))),
+            Style::default().fg(theme.text),
+            width,
+        );
+        lines.push(ChatRenderLine {
+            text: String::new(),
+            style: Style::default(),
+        });
     }
 
     if let Some(picker) = &state.resume_picker {
-        lines.push(Line::from(Span::styled(
-            "Resume session",
+        push_wrapped_line(
+            &mut lines,
+            "Resume session".to_string(),
             Style::default()
                 .fg(theme.brand)
                 .add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(Span::styled(
-            "Use Up/Down and Enter to restore. Esc closes.",
+            width,
+        );
+        push_wrapped_line(
+            &mut lines,
+            "Use Up/Down and Enter to restore. Esc closes.".to_string(),
             theme.muted_style(),
-        )));
+            width,
+        );
         for (index, session) in picker.sessions.iter().enumerate() {
-            lines.push(render_resume_session_line(
-                session,
-                index == picker.selected,
-                theme,
-            ));
+            push_wrapped_line(
+                &mut lines,
+                line_to_plain_text(&render_resume_session_line(
+                    session,
+                    index == picker.selected,
+                    theme,
+                )),
+                Style::default().fg(if index == picker.selected {
+                    theme.text
+                } else {
+                    theme.muted
+                }),
+                width,
+            );
         }
-        lines.push(Line::default());
+        lines.push(ChatRenderLine {
+            text: String::new(),
+            style: Style::default(),
+        });
     }
 
     if let Some(view) = &state.permissions_view {
-        lines.extend(render_permissions_view_lines(view, theme));
+        lines.extend(
+            render_permissions_view_lines(view, theme)
+                .into_iter()
+                .map(|line| ChatRenderLine {
+                    text: line_to_plain_text(&line),
+                    style: Style::default().fg(theme.text),
+                }),
+        );
     }
 
     lines
+}
+
+fn push_wrapped_line(lines: &mut Vec<ChatRenderLine>, text: String, style: Style, width: u16) {
+    for wrapped in wrap_plain_line(&text, width.max(1) as usize) {
+        lines.push(ChatRenderLine {
+            text: wrapped,
+            style,
+        });
+    }
+}
+
+fn wrap_plain_line(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let chars = text.chars().collect::<Vec<_>>();
+    if chars.is_empty() {
+        return vec![String::new()];
+    }
+
+    chars
+        .chunks(width)
+        .map(|chunk| chunk.iter().collect::<String>())
+        .collect()
+}
+
+fn line_to_plain_text(line: &Line<'_>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn selection_range_for_line(state: &TerminalState, line_index: usize) -> Option<(usize, usize)> {
+    let selection = state.selection?;
+    let (start, end) = selection.normalized();
+    if line_index < start.line || line_index > end.line {
+        return None;
+    }
+
+    let line_len = state
+        .chat_plain_lines
+        .get(line_index)
+        .map(|line| line.chars().count())
+        .unwrap_or_default();
+    if line_len == 0 {
+        return None;
+    }
+
+    let start_column = if line_index == start.line {
+        start.column.min(line_len.saturating_sub(1))
+    } else {
+        0
+    };
+    let end_column = if line_index == end.line {
+        end.column.min(line_len.saturating_sub(1))
+    } else {
+        line_len.saturating_sub(1)
+    };
+
+    (start_column <= end_column).then_some((start_column, end_column))
+}
+
+fn selection_point_for_mouse(
+    state: &TerminalState,
+    column: u16,
+    row: u16,
+) -> Option<SelectionPoint> {
+    let area = state.chat_area;
+    if column < area.x || column >= area.x.saturating_add(area.width) {
+        return None;
+    }
+    if row < area.y || row >= area.y.saturating_add(area.height) {
+        return None;
+    }
+
+    let local_row = row.saturating_sub(area.y) as usize;
+    let line_index = state.chat_scroll_row + local_row;
+    let line = state.chat_plain_lines.get(line_index)?;
+    let line_len = line.chars().count();
+    if line_len == 0 {
+        return Some(SelectionPoint {
+            line: line_index,
+            column: 0,
+        });
+    }
+
+    let local_col = column.saturating_sub(area.x) as usize;
+    Some(SelectionPoint {
+        line: line_index,
+        column: local_col.min(line_len.saturating_sub(1)),
+    })
+}
+
+fn next_click_count(
+    previous: Option<SelectionClickState>,
+    point: SelectionPoint,
+    now: Instant,
+) -> u8 {
+    const MULTI_CLICK_WINDOW: Duration = Duration::from_millis(450);
+
+    if let Some(previous) = previous {
+        if previous.point.line == point.line
+            && previous.point.column.abs_diff(point.column) <= 1
+            && now.duration_since(previous.at) <= MULTI_CLICK_WINDOW
+        {
+            return previous.count.saturating_add(1).min(3);
+        }
+    }
+
+    1
+}
+
+fn selection_seed_for_click(
+    state: &TerminalState,
+    point: SelectionPoint,
+    click_count: u8,
+) -> (SelectionPoint, SelectionPoint, SelectionMode) {
+    match click_count {
+        2 => {
+            let (start, end) = word_bounds_at(state, point);
+            (
+                SelectionPoint {
+                    line: point.line,
+                    column: start,
+                },
+                SelectionPoint {
+                    line: point.line,
+                    column: end,
+                },
+                SelectionMode::Word,
+            )
+        }
+        3 => {
+            let end = state
+                .chat_plain_lines
+                .get(point.line)
+                .map(|line| line.chars().count().saturating_sub(1))
+                .unwrap_or(0);
+            (
+                SelectionPoint {
+                    line: point.line,
+                    column: 0,
+                },
+                SelectionPoint {
+                    line: point.line,
+                    column: end,
+                },
+                SelectionMode::Line,
+            )
+        }
+        _ => (point, point, SelectionMode::Char),
+    }
+}
+
+fn expand_selection_focus(
+    state: &TerminalState,
+    mode: SelectionMode,
+    point: SelectionPoint,
+) -> SelectionPoint {
+    match mode {
+        SelectionMode::Char => point,
+        SelectionMode::Word => {
+            let (_, end) = word_bounds_at(state, point);
+            SelectionPoint {
+                line: point.line,
+                column: end,
+            }
+        }
+        SelectionMode::Line => SelectionPoint {
+            line: point.line,
+            column: state
+                .chat_plain_lines
+                .get(point.line)
+                .map(|line| line.chars().count().saturating_sub(1))
+                .unwrap_or(0),
+        },
+    }
+}
+
+fn word_bounds_at(state: &TerminalState, point: SelectionPoint) -> (usize, usize) {
+    let Some(line) = state.chat_plain_lines.get(point.line) else {
+        return (point.column, point.column);
+    };
+    let chars = line.chars().collect::<Vec<_>>();
+    if chars.is_empty() {
+        return (0, 0);
+    }
+
+    let index = point.column.min(chars.len().saturating_sub(1));
+    if !is_word_char(chars[index]) {
+        if let Some((word_start, word_end)) = nearest_word_bounds(&chars, index) {
+            return (word_start, word_end);
+        }
+        return (index, index);
+    }
+
+    let mut start = index;
+    while start > 0 && is_word_char(chars[start - 1]) {
+        start -= 1;
+    }
+
+    let mut end = index;
+    while end + 1 < chars.len() && is_word_char(chars[end + 1]) {
+        end += 1;
+    }
+
+    (start, end)
+}
+
+fn nearest_word_bounds(chars: &[char], origin: usize) -> Option<(usize, usize)> {
+    for distance in 1..chars.len() {
+        if let Some(left) = origin
+            .checked_sub(distance)
+            .filter(|idx| is_word_char(chars[*idx]))
+        {
+            return Some(expand_word_bounds(chars, left));
+        }
+        let right = origin + distance;
+        if right < chars.len() && is_word_char(chars[right]) {
+            return Some(expand_word_bounds(chars, right));
+        }
+    }
+    None
+}
+
+fn expand_word_bounds(chars: &[char], index: usize) -> (usize, usize) {
+    let mut start = index;
+    while start > 0 && is_word_char(chars[start - 1]) {
+        start -= 1;
+    }
+    let mut end = index;
+    while end + 1 < chars.len() && is_word_char(chars[end + 1]) {
+        end += 1;
+    }
+    (start, end)
+}
+
+fn is_word_char(ch: char) -> bool {
+    ch.is_alphanumeric() || matches!(ch, '_' | '-' | '/' | '\\' | '.')
+}
+
+fn copy_text_to_clipboard(text: String) -> anyhow::Result<()> {
+    if text.is_empty() {
+        return Ok(());
+    }
+
+    if cfg!(target_os = "windows") {
+        let mut child = Command::new("clip")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        if let Some(stdin) = child.stdin.as_mut() {
+            stdin.write_all(text.as_bytes())?;
+        }
+        let status = child.wait()?;
+        if !status.success() {
+            return Err(anyhow::anyhow!("clip exited with status {}", status));
+        }
+        return Ok(());
+    }
+
+    let osc52 = format!("\u{1b}]52;c;{}\u{7}", {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(text.as_bytes())
+    });
+    stdout().write_all(osc52.as_bytes())?;
+    stdout().flush()?;
+    Ok(())
 }
 
 fn render_prompt(
@@ -1458,6 +1930,17 @@ fn render_prompt(
             )),
             Line::from(Span::styled(
                 "Chat input is paused until this tool decision is handled.",
+                theme.muted_style(),
+            )),
+        ]
+    } else if state.has_selection() {
+        vec![
+            Line::from(Span::styled(
+                "Selection copied. Drag to adjust; Ctrl+C copies again.",
+                theme.muted_style(),
+            )),
+            Line::from(Span::styled(
+                "Esc clears selection. Double-click selects word; triple-click selects line.",
                 theme.muted_style(),
             )),
         ]
@@ -2043,5 +2526,86 @@ fn update_local_permission_rules(
         .any(|rule| rule.eq_ignore_ascii_case(tool_name))
     {
         target_rules.push(tool_name.to_string());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::terminal::state::TextSelection;
+
+    #[test]
+    fn wrap_plain_line_splits_at_width() {
+        assert_eq!(
+            wrap_plain_line("abcdef", 2),
+            vec!["ab".to_string(), "cd".to_string(), "ef".to_string()]
+        );
+    }
+
+    #[test]
+    fn selection_point_uses_visible_scroll_offset() {
+        let mut state = TerminalState::new(Settings::default(), None);
+        state.chat_area = ratatui::layout::Rect::new(0, 0, 20, 5);
+        state.chat_scroll_row = 3;
+        state.chat_plain_lines = vec![
+            "zero".to_string(),
+            "one".to_string(),
+            "two".to_string(),
+            "three".to_string(),
+            "four".to_string(),
+        ];
+
+        let point = selection_point_for_mouse(&state, 2, 1).expect("point");
+        assert_eq!(point.line, 4);
+        assert_eq!(point.column, 2);
+    }
+
+    #[test]
+    fn selection_range_maps_multiline_bounds() {
+        let mut state = TerminalState::new(Settings::default(), None);
+        state.chat_plain_lines = vec!["hello".to_string(), "world".to_string()];
+        state.selection = Some(TextSelection {
+            anchor: SelectionPoint { line: 0, column: 1 },
+            focus: SelectionPoint { line: 1, column: 2 },
+        });
+
+        assert_eq!(selection_range_for_line(&state, 0), Some((1, 4)));
+        assert_eq!(selection_range_for_line(&state, 1), Some((0, 2)));
+    }
+
+    #[test]
+    fn double_click_seeds_word_selection() {
+        let mut state = TerminalState::new(Settings::default(), None);
+        state.chat_plain_lines = vec!["say hello-world".to_string()];
+
+        let (anchor, focus, mode) =
+            selection_seed_for_click(&state, SelectionPoint { line: 0, column: 5 }, 2);
+        assert_eq!(mode, SelectionMode::Word);
+        assert_eq!(anchor.column, 4);
+        assert_eq!(focus.column, 14);
+    }
+
+    #[test]
+    fn triple_click_seeds_full_line_selection() {
+        let mut state = TerminalState::new(Settings::default(), None);
+        state.chat_plain_lines = vec!["copy me".to_string()];
+
+        let (anchor, focus, mode) =
+            selection_seed_for_click(&state, SelectionPoint { line: 0, column: 2 }, 3);
+        assert_eq!(mode, SelectionMode::Line);
+        assert_eq!(anchor.column, 0);
+        assert_eq!(focus.column, 6);
+    }
+
+    #[test]
+    fn click_count_resets_after_timeout() {
+        let point = SelectionPoint { line: 1, column: 2 };
+        let previous = SelectionClickState {
+            point,
+            count: 2,
+            at: Instant::now() - Duration::from_millis(500),
+        };
+
+        assert_eq!(next_click_count(Some(previous), point, Instant::now()), 1);
     }
 }
