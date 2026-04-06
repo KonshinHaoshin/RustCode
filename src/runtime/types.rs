@@ -1,6 +1,8 @@
 use crate::api::ChatMessage;
 use serde::{Deserialize, Serialize};
 
+const COMPACT_SUMMARY_PREFIX: &str = "Previous conversation compacted into summary:\n";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RuntimeRole {
     System,
@@ -84,6 +86,14 @@ impl RuntimeMessage {
             tool_calls: Vec::new(),
             tool_result: Some(result),
         }
+    }
+
+    pub fn compact_summary(summary: impl Into<String>) -> Self {
+        Self::system(format!("{}{}", COMPACT_SUMMARY_PREFIX, summary.into()))
+    }
+
+    pub fn is_compact_summary(&self) -> bool {
+        self.role == RuntimeRole::System && self.content.starts_with(COMPACT_SUMMARY_PREFIX)
     }
 
     pub fn has_tool_calls(&self) -> bool {

@@ -42,7 +42,7 @@ Status: completed
 - transcript/session 持久化
 - 可恢复会话
 
-Status: in_progress
+Status: completed
 
 ### Phase 4
 
@@ -50,7 +50,7 @@ Status: in_progress
 - slash commands
 - compact / token budget
 
-Status: pending
+Status: completed
 
 ### Phase 5
 
@@ -95,5 +95,12 @@ Status: pending
 - Phase 3 in progress: added project-local `./rustcode/settings.local.json` merge/load and Claude Code-style workspace-local permission persistence
 - Phase 3 in progress: `ask` now yields `AwaitingApproval`, `QueryEngine` can resume after approval, and the TUI exposes inline `allow once` / `deny once` / `always allow` / `always deny`
 - Phase 3 in progress: `src/session` now stores runtime transcript history and TUI restores the latest session from `./rustcode/sessions/`
+- Phase 3 completed: project-local/global settings now merge by source, `./rustcode/state/permission-events.json` records recent denies, and `always` writes only project-local permission rules
+- Phase 3 completed: pending approvals now persist into session JSON and restore across process restarts as inline approval cards
+- Phase 3 completed: TUI now has minimal Claude Code-style local control-plane commands for `/resume` and `/permissions`
+- Phase 4 completed: added a shared `src/input` pipeline and moved TUI / REPL / `query` local command parsing onto unified slash command handling
+- Phase 4 completed: added baseline `/help` `/clear` `/compact` `/permissions` `/model` `/status` `/resume` command support across the main entrypoints
+- Phase 4 completed: added `src/compact` with manual `/compact`, baseline auto-compact after completed turns, compact settings, and transcript compact-boundary persistence
 - Verification completed: `cargo fmt`, `cargo check`
-- Verification blocked: `cargo test -q query_loop` and `cargo check --tests` failed in this Windows environment with `os error 5` when invoking `rustc` for test compilation
+- Verification blocked: targeted `cargo test -q ...` invocations for new unit tests still fail in this Windows environment with `os error 5` when invoking `rustc` for test compilation
+- Verification note: full `cargo test -q` reaches execution here, but the suite still contains an unrelated failing i18n assertion in `i18n::translator::tests::test_translate`

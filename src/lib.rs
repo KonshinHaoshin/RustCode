@@ -18,7 +18,9 @@
 pub mod advanced;
 pub mod api;
 pub mod cli;
+pub mod compact;
 pub mod config;
+pub mod input;
 pub mod mcp;
 pub mod memory;
 pub mod onboarding;

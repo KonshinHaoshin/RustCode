@@ -1,5 +1,9 @@
 //! REPL Module - Interactive Read-Eval-Print Loop
 
+use crate::compact::CompactService;
+use crate::input::{
+    format_help_text, format_status_text, InputProcessor, LocalCommand, ProcessedInput,
+};
 use crate::runtime::{QueryEngine, RuntimeMessage, RuntimeRole};
 use crate::state::AppState;
 use std::io::{self, BufRead, Write};
@@ -7,6 +11,7 @@ use std::io::{self, BufRead, Write};
 pub struct Repl {
     state: AppState,
     conversation_history: Vec<RuntimeMessage>,
+    last_usage_total: Option<usize>,
 }
 
 impl Repl {
@@ -14,6 +19,7 @@ impl Repl {
         Self {
             state,
             conversation_history: Vec::new(),
+            last_usage_total: None,
         }
     }
 
@@ -44,11 +50,11 @@ impl Repl {
                     println!("\n👋 再见！");
                     break;
                 }
-                "help" | ".help" => self.print_help(),
-                "status" | ".status" => self.print_status(),
+                "help" | ".help" => self.execute_local_command(LocalCommand::Help)?,
+                "status" | ".status" => self.execute_local_command(LocalCommand::Status)?,
                 "clear" | ".clear" => self.clear_screen(),
                 "history" | ".history" => self.print_history(),
-                "reset" | ".reset" => self.reset_conversation(),
+                "reset" | ".reset" => self.execute_local_command(LocalCommand::Clear)?,
                 "config" | ".config" => self.print_config(),
                 _ => self.process_input(input)?,
             }
@@ -76,6 +82,11 @@ impl Repl {
     }
 
     fn process_input(&mut self, input: &str) -> anyhow::Result<()> {
+        match InputProcessor::new().process(input) {
+            ProcessedInput::LocalCommand(command) => return self.execute_local_command(command),
+            ProcessedInput::Prompt(_) => {}
+        }
+
         let engine = QueryEngine::new(self.state.settings.clone());
 
         println!();
@@ -106,6 +117,7 @@ impl Repl {
                 }
 
                 self.conversation_history = response.history;
+                self.last_usage_total = response.usage.as_ref().map(|usage| usage.total_tokens);
 
                 if let Some(usage) = response.usage {
                     println!(
@@ -125,53 +137,27 @@ impl Repl {
 
     fn print_help(&self) {
         println!();
-        println!("📖 可用命令:");
-        println!("  help, .help      - 显示帮助信息");
-        println!("  status, .status  - 显示当前状态");
-        println!("  config, .config  - 显示配置信息");
-        println!("  history, .history- 显示对话历史");
-        println!("  reset, .reset    - 重置对话");
-        println!("  clear, .clear    - 清屏");
-        println!("  exit, .exit      - 退出 REPL");
+        println!("{}", format_help_text());
         println!();
-        println!("💡 提示: 直接输入问题即可与 AI 对话");
+        println!("Legacy REPL commands:");
+        println!("  history, .history  - 显示对话历史");
+        println!("  config, .config    - 显示配置信息");
+        println!("  clear, .clear      - 清屏");
+        println!("  exit, .exit        - 退出 REPL");
         println!();
     }
 
     fn print_status(&self) {
         println!();
-        println!("📊 当前状态:");
-        println!("  Provider: {}", self.state.settings.api.provider_label());
-        println!("  模型: {}", self.state.settings.model);
-        println!("  协议: {}", self.state.settings.api.protocol().as_str());
-        println!("  API 地址: {}", self.state.settings.api.get_base_url());
-        println!("  最大 Tokens: {}", self.state.settings.api.max_tokens);
-        println!("  超时: {} 秒", self.state.settings.api.timeout);
         println!(
-            "  流式输出: {}",
-            if self.state.settings.api.streaming {
-                "开启"
-            } else {
-                "关闭"
-            }
-        );
-        println!("  对话消息数: {}", self.conversation_history.len());
-        println!(
-            "  API 密钥: {}",
-            if self.state.settings.api.get_api_key().is_some() {
-                "已设置 ✓"
-            } else {
-                "未设置 ✗"
-            }
-        );
-        println!(
-            "  Fallback: {} ({} targets)",
-            if self.state.settings.api.fallback.enabled {
-                "开启"
-            } else {
-                "关闭"
-            },
-            self.state.settings.api.fallback.chain.len()
+            "{}",
+            format_status_text(
+                &self.state.settings,
+                None,
+                self.conversation_history.len(),
+                false,
+                self.last_usage_total,
+            )
         );
         println!();
     }
@@ -209,6 +195,7 @@ impl Repl {
 
     fn reset_conversation(&mut self) {
         self.conversation_history.clear();
+        self.last_usage_total = None;
         println!();
         println!("🔄 对话已重置");
         println!();
@@ -217,5 +204,60 @@ impl Repl {
     fn clear_screen(&self) {
         print!("\x1B[2J\x1B[1;1H");
         io::stdout().flush().ok();
+    }
+
+    fn execute_local_command(&mut self, command: LocalCommand) -> anyhow::Result<()> {
+        match command {
+            LocalCommand::Help => self.print_help(),
+            LocalCommand::Clear => self.reset_conversation(),
+            LocalCommand::Compact { instructions } => self.compact_history(instructions)?,
+            LocalCommand::Permissions => {
+                println!();
+                println!("/permissions is only interactive in the TUI.");
+                println!();
+            }
+            LocalCommand::Model { model } => {
+                println!();
+                if let Some(model) = model {
+                    self.state.settings.model = model.clone();
+                    println!(
+                        "Active model changed to {}/{}.",
+                        self.state.settings.api.provider_label(),
+                        model
+                    );
+                } else {
+                    println!(
+                        "Active model: {}/{}.",
+                        self.state.settings.api.provider_label(),
+                        self.state.settings.model
+                    );
+                }
+                println!();
+            }
+            LocalCommand::Status => self.print_status(),
+            LocalCommand::Resume { .. } => {
+                println!();
+                println!("/resume is only supported in the TUI right now.");
+                println!();
+            }
+        }
+
+        Ok(())
+    }
+
+    fn compact_history(&mut self, instructions: Option<String>) -> anyhow::Result<()> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let outcome = runtime.block_on(async {
+            CompactService::new(self.state.settings.clone())
+                .compact_history(&self.conversation_history, instructions.as_deref())
+                .await
+        })?;
+        self.conversation_history = outcome.history;
+        println!();
+        println!("Conversation compacted.");
+        println!();
+        Ok(())
     }
 }

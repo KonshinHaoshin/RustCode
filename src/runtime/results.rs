@@ -37,6 +37,8 @@ pub struct QueryTurnResult {
     pub tool_call_count: usize,
     pub status: TurnStatus,
     pub pending_approval: Option<PendingApproval>,
+    pub was_compacted: bool,
+    pub compaction_summary: Option<String>,
 }
 
 impl QueryTurnResult {

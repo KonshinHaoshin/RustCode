@@ -1,6 +1,9 @@
 //! CLI Arguments
 
 use super::CliArgs;
+use crate::input::{
+    format_help_text, format_status_text, InputProcessor, LocalCommand, ProcessedInput,
+};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -110,6 +113,13 @@ impl Cli {
     }
 
     async fn run_query(&self, state: crate::state::AppState, prompt: String) -> anyhow::Result<()> {
+        match InputProcessor::new().process(&prompt) {
+            ProcessedInput::LocalCommand(command) => {
+                return Self::run_query_local_command(state, command).await;
+            }
+            ProcessedInput::Prompt(_) => {}
+        }
+
         let engine = crate::runtime::QueryEngine::new(state.settings.clone());
         let response = engine.submit_text_turn(&[], prompt).await?;
         if response.status == crate::runtime::TurnStatus::AwaitingApproval {
@@ -120,6 +130,53 @@ impl Cli {
         if let Some(content) = response.assistant_text() {
             if !content.is_empty() {
                 println!("{}", content);
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn run_query_local_command(
+        state: crate::state::AppState,
+        command: LocalCommand,
+    ) -> anyhow::Result<()> {
+        match command {
+            LocalCommand::Help => {
+                println!("{}", format_help_text());
+            }
+            LocalCommand::Status => {
+                println!(
+                    "{}",
+                    format_status_text(&state.settings, None, 0, false, None)
+                );
+            }
+            LocalCommand::Model { model } => {
+                if let Some(model) = model {
+                    println!(
+                        "Requested model switch to {}/{} for this invocation only is not supported in `query`; use TUI or REPL.",
+                        state.settings.api.provider_label(),
+                        model
+                    );
+                } else {
+                    println!(
+                        "Active model: {}/{}",
+                        state.settings.api.provider_label(),
+                        state.settings.model
+                    );
+                }
+            }
+            LocalCommand::Permissions | LocalCommand::Resume { .. } => {
+                return Err(anyhow::anyhow!(
+                    "This slash command requires interactive TUI support."
+                ));
+            }
+            LocalCommand::Clear => {
+                println!("Non-interactive query has no active conversation to clear.");
+            }
+            LocalCommand::Compact { .. } => {
+                return Err(anyhow::anyhow!(
+                    "Non-interactive query has no persisted conversation to compact."
+                ));
             }
         }
 

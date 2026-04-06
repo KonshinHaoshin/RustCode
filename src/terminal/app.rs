@@ -1,14 +1,23 @@
 use super::{
     state::{
         ChatWorkerResult, DisplayMessage, DisplayRole, FallbackField, OnboardingStep,
-        PendingChatRequest, PrimaryField, TerminalState, ViewMode,
+        PendingChatRequest, PermissionSection, PermissionsViewState, PrimaryField,
+        ResumePickerState, TerminalState, ViewMode,
     },
     theme::{TerminalTheme, BLACK_CIRCLE, GUTTER},
 };
 use crate::{
-    config::{ApiProtocol, ApiProvider, FallbackTarget, Settings},
+    compact::CompactService,
+    config::{
+        add_project_local_permission_rule, load_project_local_settings,
+        remove_project_local_permission_rule, ApiProtocol, ApiProvider, FallbackTarget,
+        ProjectPermissionRuleKind, Settings,
+    },
+    input::{format_help_text, format_status_text, InputProcessor, LocalCommand, ProcessedInput},
     onboarding::OnboardingDraft,
+    permissions::events::{PermissionEvent, PermissionEventStore},
     runtime::{ApprovalAction, QueryEngine, QueryTurnResult, RuntimeMessage, TurnStatus},
+    session::SessionInfo,
 };
 use crossterm::{
     event::{
@@ -151,6 +160,14 @@ impl TerminalApp {
     }
 
     fn handle_chat_key(&mut self, key: KeyEvent) -> bool {
+        if self.state.resume_picker.is_some() {
+            return self.handle_resume_picker_key(key);
+        }
+
+        if self.state.permissions_view.is_some() {
+            return self.handle_permissions_view_key(key);
+        }
+
         if self.state.pending_approval.is_some() {
             return self.handle_approval_key(key);
         }
@@ -182,6 +199,141 @@ impl TerminalApp {
             }
             KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.state.input.push(ch);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn handle_resume_picker_key(&mut self, key: KeyEvent) -> bool {
+        if self.state.resume_picker.is_none() {
+            return false;
+        }
+
+        match key.code {
+            KeyCode::Up => {
+                if let Some(picker) = self.state.resume_picker.as_mut() {
+                    picker.selected = picker.selected.saturating_sub(1);
+                }
+                true
+            }
+            KeyCode::Down => {
+                if let Some(picker) = self.state.resume_picker.as_mut() {
+                    if picker.selected + 1 < picker.sessions.len() {
+                        picker.selected += 1;
+                    }
+                }
+                true
+            }
+            KeyCode::Enter => {
+                let session_id = self.state.resume_picker.as_ref().and_then(|picker| {
+                    picker
+                        .sessions
+                        .get(picker.selected)
+                        .map(|session| session.id.clone())
+                });
+                if let Some(session_id) = session_id {
+                    return self.resume_session_by_id(&session_id);
+                }
+                false
+            }
+            KeyCode::Esc => {
+                self.state.resume_picker = None;
+                self.state.status = "Closed resume picker.".to_string();
+                self.state.mark_chat_render_dirty();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn handle_permissions_view_key(&mut self, key: KeyEvent) -> bool {
+        if self.state.permissions_view.is_none() {
+            return false;
+        }
+
+        match key.code {
+            KeyCode::Left => {
+                if let Some(view) = self.state.permissions_view.as_mut() {
+                    view.section = match view.section {
+                        PermissionSection::Allow => PermissionSection::Recent,
+                        PermissionSection::Deny => PermissionSection::Allow,
+                        PermissionSection::Ask => PermissionSection::Deny,
+                        PermissionSection::Recent => PermissionSection::Ask,
+                    };
+                    view.selected = 0;
+                }
+                self.state.mark_chat_render_dirty();
+                true
+            }
+            KeyCode::Right | KeyCode::Tab => {
+                if let Some(view) = self.state.permissions_view.as_mut() {
+                    view.section = match view.section {
+                        PermissionSection::Allow => PermissionSection::Deny,
+                        PermissionSection::Deny => PermissionSection::Ask,
+                        PermissionSection::Ask => PermissionSection::Recent,
+                        PermissionSection::Recent => PermissionSection::Allow,
+                    };
+                    view.selected = 0;
+                }
+                self.state.mark_chat_render_dirty();
+                true
+            }
+            KeyCode::Up => {
+                if let Some(view) = self.state.permissions_view.as_mut() {
+                    view.selected = view.selected.saturating_sub(1);
+                }
+                self.state.mark_chat_render_dirty();
+                true
+            }
+            KeyCode::Down => {
+                if let Some(view) = self.state.permissions_view.as_mut() {
+                    let max_index = permissions_item_count(view).saturating_sub(1);
+                    view.selected = (view.selected + 1).min(max_index);
+                }
+                self.state.mark_chat_render_dirty();
+                true
+            }
+            KeyCode::Char('d')
+                if self
+                    .state
+                    .permissions_view
+                    .as_ref()
+                    .is_some_and(|view| view.section != PermissionSection::Recent) =>
+            {
+                self.remove_selected_local_rule()
+            }
+            KeyCode::Char('a')
+                if self
+                    .state
+                    .permissions_view
+                    .as_ref()
+                    .is_some_and(|view| view.section == PermissionSection::Recent) =>
+            {
+                self.add_recent_event_rule(ProjectPermissionRuleKind::Allow)
+            }
+            KeyCode::Char('n')
+                if self
+                    .state
+                    .permissions_view
+                    .as_ref()
+                    .is_some_and(|view| view.section == PermissionSection::Recent) =>
+            {
+                self.add_recent_event_rule(ProjectPermissionRuleKind::Deny)
+            }
+            KeyCode::Char('k')
+                if self
+                    .state
+                    .permissions_view
+                    .as_ref()
+                    .is_some_and(|view| view.section == PermissionSection::Recent) =>
+            {
+                self.add_recent_event_rule(ProjectPermissionRuleKind::Ask)
+            }
+            KeyCode::Esc => {
+                self.state.permissions_view = None;
+                self.state.status = "Closed permissions view.".to_string();
+                self.state.mark_chat_render_dirty();
                 true
             }
             _ => false,
@@ -464,14 +616,27 @@ impl TerminalApp {
     }
 
     fn submit_prompt(&mut self) -> bool {
-        if self.state.thinking || self.state.pending_approval.is_some() {
-            return false;
-        }
         let prompt = self.state.input.trim().to_string();
         if prompt.is_empty() {
             return false;
         }
 
+        match InputProcessor::new().process(&prompt) {
+            ProcessedInput::LocalCommand(command) => {
+                self.state.input.clear();
+                self.execute_local_command(command)
+            }
+            ProcessedInput::Prompt(prompt) => {
+                if self.state.thinking || self.state.pending_approval.is_some() {
+                    return false;
+                }
+                self.submit_runtime_prompt(prompt);
+                true
+            }
+        }
+    }
+
+    fn submit_runtime_prompt(&mut self, prompt: String) {
         let message = DisplayMessage {
             role: DisplayRole::User,
             content: prompt.clone(),
@@ -500,7 +665,228 @@ impl TerminalApp {
             base_history,
             user_message: Some(user_message),
         });
+    }
 
+    fn execute_local_command(&mut self, command: LocalCommand) -> bool {
+        match command {
+            LocalCommand::Help => {
+                self.push_system_message(format_help_text());
+                self.state.status = "Displayed slash command help.".to_string();
+                true
+            }
+            LocalCommand::Clear => {
+                self.state.reset_conversation();
+                self.state.status = "Cleared conversation and reset active session.".to_string();
+                self.state.mark_chat_render_dirty();
+                true
+            }
+            LocalCommand::Compact { instructions } => self.compact_current_history(instructions),
+            LocalCommand::Permissions => self.open_permissions_view(),
+            LocalCommand::Model { model } => {
+                let detail = if let Some(model) = model {
+                    self.state.settings.model = model.clone();
+                    format!(
+                        "Active model changed to {}/{}.",
+                        self.state.settings.api.provider_label(),
+                        model
+                    )
+                } else {
+                    format!(
+                        "Active model: {}/{}.",
+                        self.state.settings.api.provider_label(),
+                        self.state.settings.model
+                    )
+                };
+                self.push_system_message(detail.clone());
+                self.state.status = detail;
+                true
+            }
+            LocalCommand::Status => {
+                self.push_system_message(format_status_text(
+                    &self.state.settings,
+                    self.state.active_session_id.as_deref(),
+                    self.state.conversation_history.len(),
+                    self.state.pending_approval.is_some(),
+                    self.state.last_usage_total,
+                ));
+                self.state.status = "Displayed runtime status.".to_string();
+                true
+            }
+            LocalCommand::Resume { session_id } => match session_id {
+                Some(session_id) => self.resume_session_by_id(&session_id),
+                None => self.open_resume_picker(),
+            },
+        }
+    }
+
+    fn compact_current_history(&mut self, instructions: Option<String>) -> bool {
+        if self.state.thinking {
+            return false;
+        }
+        if self.state.pending_approval.is_some() {
+            self.push_system_message("Cannot compact while tool approval is pending.".to_string());
+            self.state.status = "Compact blocked by pending approval.".to_string();
+            return true;
+        }
+
+        let history = (*self.state.conversation_history).clone();
+        let settings = self.state.settings.clone();
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                self.push_system_message(format!(
+                    "Failed to initialize compact runtime: {}",
+                    error
+                ));
+                self.state.status = "Compact failed.".to_string();
+                return true;
+            }
+        };
+
+        match runtime.block_on(async {
+            CompactService::new(settings)
+                .compact_history(&history, instructions.as_deref())
+                .await
+        }) {
+            Ok(outcome) => {
+                self.state.replace_history(outcome.history);
+                self.state.status = "Conversation compacted.".to_string();
+                if let Err(error) = self.state.persist_current_session() {
+                    self.push_system_message(format!("Session save failed: {}", error));
+                    self.state.status = "Session save failed.".to_string();
+                }
+                true
+            }
+            Err(error) => {
+                self.push_system_message(format!("Compact failed: {}", error));
+                self.state.status = "Compact failed.".to_string();
+                true
+            }
+        }
+    }
+
+    fn push_system_message(&mut self, content: String) {
+        self.state.messages.push(DisplayMessage {
+            role: DisplayRole::System,
+            content,
+        });
+        self.state.mark_chat_render_dirty();
+    }
+
+    fn open_resume_picker(&mut self) -> bool {
+        match self.state.session_manager.list_recent() {
+            Ok(mut sessions) => {
+                if let Some(active_id) = &self.state.active_session_id {
+                    sessions.retain(|session| session.id != *active_id);
+                }
+                if sessions.is_empty() {
+                    self.state.status = "No resumable sessions found in this project.".to_string();
+                } else {
+                    self.state.resume_picker = Some(ResumePickerState {
+                        sessions,
+                        selected: 0,
+                    });
+                    self.state.permissions_view = None;
+                    self.state.status = "Select a session to resume.".to_string();
+                }
+                self.state.mark_chat_render_dirty();
+                true
+            }
+            Err(error) => {
+                self.state.status = format!("Failed to list sessions: {}", error);
+                self.state.messages.push(DisplayMessage {
+                    role: DisplayRole::System,
+                    content: format!("Failed to list sessions: {}", error),
+                });
+                self.state.mark_chat_render_dirty();
+                true
+            }
+        }
+    }
+
+    fn resume_session_by_id(&mut self, session_id: &str) -> bool {
+        match self.state.session_manager.load(session_id) {
+            Ok(Some(session)) => {
+                self.state.restore_session(session);
+                true
+            }
+            Ok(None) => {
+                self.state.status = format!("Session {} not found.", session_id);
+                self.state.messages.push(DisplayMessage {
+                    role: DisplayRole::System,
+                    content: format!("Session {} not found.", session_id),
+                });
+                self.state.mark_chat_render_dirty();
+                true
+            }
+            Err(error) => {
+                self.state.status = format!("Session restore failed: {}", error);
+                self.state.messages.push(DisplayMessage {
+                    role: DisplayRole::System,
+                    content: format!("Session restore failed: {}", error),
+                });
+                self.state.mark_chat_render_dirty();
+                true
+            }
+        }
+    }
+
+    fn open_permissions_view(&mut self) -> bool {
+        let global_settings = match Settings::load_global() {
+            Ok(settings) => settings.permissions,
+            Err(error) => {
+                self.state.status = format!("Failed to load global permissions: {}", error);
+                self.state.messages.push(DisplayMessage {
+                    role: DisplayRole::System,
+                    content: format!("Failed to load global permissions: {}", error),
+                });
+                self.state.mark_chat_render_dirty();
+                return true;
+            }
+        };
+
+        let local_permissions = match load_project_local_settings(None) {
+            Ok(local) => local
+                .and_then(|settings| settings.permissions)
+                .unwrap_or_default(),
+            Err(error) => {
+                self.state.status = format!("Failed to load local permissions: {}", error);
+                self.state.messages.push(DisplayMessage {
+                    role: DisplayRole::System,
+                    content: format!("Failed to load local permissions: {}", error),
+                });
+                self.state.mark_chat_render_dirty();
+                return true;
+            }
+        };
+
+        let recent_events = match PermissionEventStore::load(None) {
+            Ok(mut events) => {
+                events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+                events
+            }
+            Err(error) => {
+                self.state.messages.push(DisplayMessage {
+                    role: DisplayRole::System,
+                    content: format!("Failed to load permission events: {}", error),
+                });
+                Vec::new()
+            }
+        };
+
+        self.state.permissions_view = Some(PermissionsViewState {
+            section: PermissionSection::Allow,
+            selected: 0,
+            global_permissions: global_settings,
+            local_permissions,
+            recent_events,
+        });
+        self.state.resume_picker = None;
+        self.state.status = "Inspecting project-local permissions.".to_string();
+        self.state.mark_chat_render_dirty();
         true
     }
 
@@ -551,13 +937,18 @@ impl TerminalApp {
     }
 
     fn apply_turn_result(&mut self, turn: QueryTurnResult) {
+        self.state.last_usage_total = turn.usage.as_ref().map(|usage| usage.total_tokens);
         self.state.replace_history(turn.history);
         self.state.scroll_offset = 0;
 
         match turn.status {
             TurnStatus::Completed => {
                 self.state.set_pending_approval(None);
-                self.state.status = "Response received.".to_string();
+                self.state.status = if turn.was_compacted {
+                    "Response received and conversation compacted.".to_string()
+                } else {
+                    "Response received.".to_string()
+                };
             }
             TurnStatus::AwaitingApproval => {
                 self.state.set_pending_approval(turn.pending_approval);
@@ -571,6 +962,83 @@ impl TerminalApp {
                 content: format!("Session save failed: {}", error),
             });
             self.state.status = "Session save failed.".to_string();
+        }
+    }
+
+    fn remove_selected_local_rule(&mut self) -> bool {
+        let Some(view) = self.state.permissions_view.as_mut() else {
+            return false;
+        };
+        let Some(tool_name) = selected_local_rule(view).map(str::to_string) else {
+            self.state.status = "No local rule selected.".to_string();
+            return true;
+        };
+
+        let kind = match view.section {
+            PermissionSection::Allow => ProjectPermissionRuleKind::Allow,
+            PermissionSection::Deny => ProjectPermissionRuleKind::Deny,
+            PermissionSection::Ask => ProjectPermissionRuleKind::Ask,
+            PermissionSection::Recent => return false,
+        };
+
+        match remove_project_local_permission_rule(None, kind, &tool_name) {
+            Ok(local_permissions) => {
+                view.local_permissions = local_permissions;
+                let current_rules = selected_section_rules(view);
+                if view.selected >= current_rules.len() && !current_rules.is_empty() {
+                    view.selected = current_rules.len() - 1;
+                } else if current_rules.is_empty() {
+                    view.selected = 0;
+                }
+                refresh_runtime_permissions(&mut self.state.settings.permissions, view);
+                self.state.status = format!("Removed local rule for {}.", tool_name);
+                self.state.mark_chat_render_dirty();
+                true
+            }
+            Err(error) => {
+                self.state.status = format!("Failed to update local permissions: {}", error);
+                self.state.messages.push(DisplayMessage {
+                    role: DisplayRole::System,
+                    content: format!("Failed to update local permissions: {}", error),
+                });
+                self.state.mark_chat_render_dirty();
+                true
+            }
+        }
+    }
+
+    fn add_recent_event_rule(&mut self, kind: ProjectPermissionRuleKind) -> bool {
+        let Some(view) = self.state.permissions_view.as_mut() else {
+            return false;
+        };
+        let Some(event) = view.recent_events.get(view.selected).cloned() else {
+            self.state.status = "No recent permission event selected.".to_string();
+            return true;
+        };
+
+        match add_project_local_permission_rule(None, kind, &event.tool_name) {
+            Ok(local_permissions) => {
+                view.local_permissions = local_permissions;
+                refresh_runtime_permissions(&mut self.state.settings.permissions, view);
+                view.section = match kind {
+                    ProjectPermissionRuleKind::Allow => PermissionSection::Allow,
+                    ProjectPermissionRuleKind::Deny => PermissionSection::Deny,
+                    ProjectPermissionRuleKind::Ask => PermissionSection::Ask,
+                };
+                view.selected = 0;
+                self.state.status = format!("Saved project-local rule for {}.", event.tool_name);
+                self.state.mark_chat_render_dirty();
+                true
+            }
+            Err(error) => {
+                self.state.status = format!("Failed to save local permissions: {}", error);
+                self.state.messages.push(DisplayMessage {
+                    role: DisplayRole::System,
+                    content: format!("Failed to save local permissions: {}", error),
+                });
+                self.state.mark_chat_render_dirty();
+                true
+            }
         }
     }
 
@@ -598,6 +1066,24 @@ impl TerminalApp {
             ApprovalSelection::AllowOnce | ApprovalSelection::DenyOnce => {}
         }
 
+        if matches!(
+            selection,
+            ApprovalSelection::DenyOnce | ApprovalSelection::AlwaysDeny
+        ) {
+            let _ = PermissionEventStore::append(
+                None,
+                PermissionEvent {
+                    tool_name: view_model.pending.tool_call.name.clone(),
+                    decision: match selection {
+                        ApprovalSelection::AlwaysDeny => "always_deny".to_string(),
+                        _ => "deny_once".to_string(),
+                    },
+                    reason: view_model.pending.reason.clone(),
+                    timestamp: chrono::Utc::now(),
+                },
+            );
+        }
+
         let action = match selection {
             ApprovalSelection::AllowOnce => ApprovalAction::AllowOnce(view_model.pending),
             ApprovalSelection::DenyOnce => ApprovalAction::DenyOnce(view_model.pending),
@@ -610,6 +1096,12 @@ impl TerminalApp {
         self.state.set_pending_approval(None);
         self.state.spinner_tick = 0;
         self.state.last_tick = std::time::Instant::now();
+        if let Err(error) = self.state.persist_current_session() {
+            self.state.messages.push(DisplayMessage {
+                role: DisplayRole::System,
+                content: format!("Session save failed: {}", error),
+            });
+        }
         let base_history = Arc::clone(&self.state.conversation_history);
         self.state.pending_response = Some(PendingChatRequest {
             receiver: spawn_approval_request(
@@ -878,6 +1370,15 @@ fn render_chat_lines(
                 .fg(theme.brand)
                 .add_modifier(Modifier::BOLD),
         )));
+        if matches!(
+            approval.origin,
+            super::state::PendingApprovalOrigin::RestoredSession
+        ) {
+            lines.push(Line::from(Span::styled(
+                "Restored from previous session.",
+                theme.muted_style(),
+            )));
+        }
         lines.push(Line::from(format!(
             "Tool: {}",
             approval.pending.tool_call.name
@@ -893,6 +1394,31 @@ fn render_chat_lines(
         lines.push(Line::default());
     }
 
+    if let Some(picker) = &state.resume_picker {
+        lines.push(Line::from(Span::styled(
+            "Resume session",
+            Style::default()
+                .fg(theme.brand)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(Span::styled(
+            "Use Up/Down and Enter to restore. Esc closes.",
+            theme.muted_style(),
+        )));
+        for (index, session) in picker.sessions.iter().enumerate() {
+            lines.push(render_resume_session_line(
+                session,
+                index == picker.selected,
+                theme,
+            ));
+        }
+        lines.push(Line::default());
+    }
+
+    if let Some(view) = &state.permissions_view {
+        lines.extend(render_permissions_view_lines(view, theme));
+    }
+
     lines
 }
 
@@ -902,7 +1428,29 @@ fn render_prompt(
     theme: TerminalTheme,
     state: &TerminalState,
 ) {
-    let mut lines: Vec<Line<'static>> = if state.pending_approval.is_some() {
+    let mut lines: Vec<Line<'static>> = if state.resume_picker.is_some() {
+        vec![
+            Line::from(Span::styled(
+                "Resume picker open. Select a session to restore.",
+                theme.muted_style(),
+            )),
+            Line::from(Span::styled(
+                "Chat input is paused until the picker is closed.",
+                theme.muted_style(),
+            )),
+        ]
+    } else if state.permissions_view.is_some() {
+        vec![
+            Line::from(Span::styled(
+                "Permissions view open. d removes local rule; a/n/k promote recent event.",
+                theme.muted_style(),
+            )),
+            Line::from(Span::styled(
+                "Use Left/Right to switch section. Esc closes.",
+                theme.muted_style(),
+            )),
+        ]
+    } else if state.pending_approval.is_some() {
         vec![
             Line::from(Span::styled(
                 "Approval pending. Use a/d/A/D or Enter to continue.",
@@ -1002,6 +1550,206 @@ fn render_status_line(
         Paragraph::new(Line::from(spans)).alignment(Alignment::Left),
         area,
     );
+}
+
+fn render_resume_session_line(
+    session: &SessionInfo,
+    selected: bool,
+    theme: TerminalTheme,
+) -> Line<'static> {
+    let marker = if selected { BLACK_CIRCLE } else { " " };
+    let status = format!("{:?}", session.status).to_ascii_lowercase();
+    Line::from(vec![
+        Span::styled(
+            format!("{} ", marker),
+            Style::default().fg(if selected { theme.brand } else { theme.muted }),
+        ),
+        Span::styled(session.name.clone(), Style::default().fg(theme.text)),
+        Span::styled("  ", theme.muted_style()),
+        Span::styled(session.id.clone(), theme.muted_style()),
+        Span::styled("  ", theme.muted_style()),
+        Span::styled(status, Style::default().fg(theme.subtle)),
+    ])
+}
+
+fn render_permissions_view_lines(
+    view: &PermissionsViewState,
+    theme: TerminalTheme,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Permissions",
+            Style::default()
+                .fg(theme.brand)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(render_permission_tabs(view.section, theme)),
+    ];
+
+    match view.section {
+        PermissionSection::Allow | PermissionSection::Deny | PermissionSection::Ask => {
+            let rules = selected_section_rules(view);
+            if rules.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "No project-local rules in this section.",
+                    theme.muted_style(),
+                )));
+            } else {
+                for (index, rule) in rules.iter().enumerate() {
+                    let selected = index == view.selected;
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            format!("{} ", if selected { BLACK_CIRCLE } else { " " }),
+                            Style::default().fg(if selected { theme.brand } else { theme.muted }),
+                        ),
+                        Span::styled(rule.clone(), Style::default().fg(theme.text)),
+                    ]));
+                }
+            }
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "Global {} rules: {}",
+                    permission_section_name(view.section).to_ascii_lowercase(),
+                    selected_global_rules(view).join(", ")
+                ),
+                theme.muted_style(),
+            )));
+            lines.push(Line::from(Span::styled(
+                "Press d to remove the selected local rule.",
+                theme.muted_style(),
+            )));
+        }
+        PermissionSection::Recent => {
+            if view.recent_events.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "No recent permission events.",
+                    theme.muted_style(),
+                )));
+            } else {
+                for (index, event) in view.recent_events.iter().enumerate() {
+                    let selected = index == view.selected;
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            format!("{} ", if selected { BLACK_CIRCLE } else { " " }),
+                            Style::default().fg(if selected { theme.brand } else { theme.muted }),
+                        ),
+                        Span::styled(event.tool_name.clone(), Style::default().fg(theme.text)),
+                        Span::styled("  ", theme.muted_style()),
+                        Span::styled(event.decision.clone(), theme.muted_style()),
+                    ]));
+                }
+            }
+            lines.push(Line::from(Span::styled(
+                "Press a/n/k to add the selected event to allow/deny/ask.",
+                theme.muted_style(),
+            )));
+        }
+    }
+
+    lines.push(Line::default());
+    lines
+}
+
+fn render_permission_tabs(section: PermissionSection, theme: TerminalTheme) -> Vec<Span<'static>> {
+    let tabs = [
+        PermissionSection::Allow,
+        PermissionSection::Deny,
+        PermissionSection::Ask,
+        PermissionSection::Recent,
+    ];
+    let mut spans = Vec::new();
+    for (index, tab) in tabs.into_iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw(" "));
+        }
+        let style = if tab == section {
+            Style::default()
+                .fg(theme.panel)
+                .bg(theme.brand)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.muted)
+        };
+        spans.push(Span::styled(
+            format!("[{}]", permission_section_name(tab)),
+            style,
+        ));
+    }
+    spans
+}
+
+fn permission_section_name(section: PermissionSection) -> &'static str {
+    match section {
+        PermissionSection::Allow => "Allow",
+        PermissionSection::Deny => "Deny",
+        PermissionSection::Ask => "Ask",
+        PermissionSection::Recent => "Recent",
+    }
+}
+
+fn permissions_item_count(view: &PermissionsViewState) -> usize {
+    match view.section {
+        PermissionSection::Allow | PermissionSection::Deny | PermissionSection::Ask => {
+            selected_section_rules(view).len().max(1)
+        }
+        PermissionSection::Recent => view.recent_events.len().max(1),
+    }
+}
+
+fn selected_section_rules(view: &PermissionsViewState) -> &[String] {
+    match view.section {
+        PermissionSection::Allow => &view.local_permissions.allow_tools,
+        PermissionSection::Deny => &view.local_permissions.deny_tools,
+        PermissionSection::Ask => &view.local_permissions.ask_tools,
+        PermissionSection::Recent => &[],
+    }
+}
+
+fn selected_global_rules(view: &PermissionsViewState) -> &[String] {
+    match view.section {
+        PermissionSection::Allow => &view.global_permissions.allow_tools,
+        PermissionSection::Deny => &view.global_permissions.deny_tools,
+        PermissionSection::Ask => &view.global_permissions.ask_tools,
+        PermissionSection::Recent => &[],
+    }
+}
+
+fn selected_local_rule(view: &PermissionsViewState) -> Option<&str> {
+    selected_section_rules(view)
+        .get(view.selected)
+        .map(String::as_str)
+}
+
+fn refresh_runtime_permissions(
+    runtime_permissions: &mut crate::permissions::PermissionsSettings,
+    view: &PermissionsViewState,
+) {
+    runtime_permissions.mode = view
+        .local_permissions
+        .mode
+        .unwrap_or(view.global_permissions.mode);
+    runtime_permissions.allow_tools = merge_runtime_rules(
+        &view.global_permissions.allow_tools,
+        &view.local_permissions.allow_tools,
+    );
+    runtime_permissions.deny_tools = merge_runtime_rules(
+        &view.global_permissions.deny_tools,
+        &view.local_permissions.deny_tools,
+    );
+    runtime_permissions.ask_tools = merge_runtime_rules(
+        &view.global_permissions.ask_tools,
+        &view.local_permissions.ask_tools,
+    );
+}
+
+fn merge_runtime_rules(global: &[String], local: &[String]) -> Vec<String> {
+    let mut merged = global.to_vec();
+    for rule in local {
+        if !merged.iter().any(|entry| entry.eq_ignore_ascii_case(rule)) {
+            merged.push(rule.clone());
+        }
+    }
+    merged
 }
 
 fn render_primary_line(

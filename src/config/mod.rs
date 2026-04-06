@@ -8,8 +8,10 @@ pub use api_config::{
 };
 pub use mcp_config::{McpConfig, McpServerStatus};
 
-use crate::permissions::PermissionsSettings;
+use crate::compact::CompactSettings;
+use crate::permissions::{PermissionMode, PermissionsSettings};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
 /// Main configuration structure
@@ -36,6 +38,8 @@ pub struct Settings {
     pub permissions: PermissionsSettings,
     /// Session persistence settings
     pub session: SessionSettings,
+    /// Compact settings
+    pub compact: CompactSettings,
     /// First-run onboarding state
     pub onboarding: OnboardingSettings,
 }
@@ -165,6 +169,7 @@ impl Default for Settings {
             plugins: PluginSettings::default(),
             permissions: PermissionsSettings::default(),
             session: SessionSettings::default(),
+            compact: CompactSettings::default(),
             onboarding: OnboardingSettings::default(),
         }
     }
@@ -172,9 +177,38 @@ impl Default for Settings {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
-struct ProjectLocalSettings {
-    permissions: Option<PermissionsSettings>,
-    session: Option<SessionSettings>,
+pub struct ProjectLocalSettings {
+    pub permissions: Option<ProjectLocalPermissions>,
+    pub session: Option<ProjectLocalSessionSettings>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ProjectLocalPermissions {
+    pub mode: Option<PermissionMode>,
+    pub allow_tools: Vec<String>,
+    pub deny_tools: Vec<String>,
+    pub ask_tools: Vec<String>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ProjectLocalSessionSettings {
+    pub auto_restore_last_session: Option<bool>,
+    pub persist_transcript: Option<bool>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectPermissionRuleKind {
+    Allow,
+    Deny,
+    Ask,
 }
 
 pub fn global_config_dir() -> PathBuf {
@@ -205,16 +239,24 @@ pub fn project_sessions_dir(cwd: Option<&Path>) -> Option<PathBuf> {
     project_rustcode_dir(cwd).map(|dir| dir.join("sessions"))
 }
 
+pub fn project_state_dir(cwd: Option<&Path>) -> Option<PathBuf> {
+    project_rustcode_dir(cwd).map(|dir| dir.join("state"))
+}
+
+pub fn project_permission_events_path(cwd: Option<&Path>) -> Option<PathBuf> {
+    project_state_dir(cwd).map(|dir| dir.join("permission-events.json"))
+}
+
 impl Settings {
-    /// Load settings from file
-    pub fn load() -> anyhow::Result<Self> {
+    /// Load global settings from file without project-local overrides.
+    pub fn load_global() -> anyhow::Result<Self> {
         let config_path = global_settings_path();
         let legacy_path = dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".claude-code")
             .join("settings.json");
 
-        let mut settings = if config_path.exists() {
+        let settings = if config_path.exists() {
             let content = std::fs::read_to_string(&config_path)?;
             serde_json::from_str(&content)?
         } else if legacy_path.exists() {
@@ -228,15 +270,16 @@ impl Settings {
             settings
         };
 
-        if let Some(local_path) = project_local_settings_path(None).filter(|path| path.exists()) {
-            let content = std::fs::read_to_string(local_path)?;
-            let local_settings: ProjectLocalSettings = serde_json::from_str(&content)?;
-            if let Some(permissions) = local_settings.permissions {
-                settings.permissions = permissions;
-            }
-            if let Some(session) = local_settings.session {
-                settings.session = session;
-            }
+        Ok(settings)
+    }
+
+    /// Load settings from file with project-local overrides.
+    pub fn load() -> anyhow::Result<Self> {
+        let mut settings = Self::load_global()?;
+        if let Some(local_settings) = load_project_local_settings(None)? {
+            settings.permissions =
+                merge_permissions(&settings.permissions, local_settings.permissions.as_ref());
+            settings.session = merge_session(&settings.session, local_settings.session.as_ref());
         }
 
         Ok(settings)
@@ -326,6 +369,25 @@ impl Settings {
             "session.persist_transcript" => {
                 settings.session.persist_transcript = value.parse().unwrap_or(true)
             }
+            "compact.enabled" => settings.compact.enabled = value.parse().unwrap_or(true),
+            "compact.auto_compact" => settings.compact.auto_compact = value.parse().unwrap_or(true),
+            "compact.max_turns_before_compact" => {
+                settings.compact.max_turns_before_compact = value.parse().unwrap_or(24)
+            }
+            "compact.max_tokens_before_compact" => {
+                settings.compact.max_tokens_before_compact = value.parse().unwrap_or(32_000)
+            }
+            "compact.preserve_recent_turns" => {
+                settings.compact.preserve_recent_turns = value.parse().unwrap_or(4)
+            }
+            "compact.summary_model" => {
+                let trimmed = value.trim();
+                settings.compact.summary_model = if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            }
             "onboarding.completed" => {
                 settings.onboarding.has_completed_onboarding = value.parse().unwrap_or(false)
             }
@@ -355,8 +417,63 @@ impl Settings {
 
 pub fn save_project_local_permissions(
     cwd: Option<&Path>,
-    permissions: &PermissionsSettings,
+    permissions: &ProjectLocalPermissions,
 ) -> anyhow::Result<()> {
+    mutate_project_local_settings(cwd, |local_settings| {
+        local_settings.permissions = Some(permissions.clone());
+    })
+    .map(|_| ())
+}
+
+pub fn load_project_local_settings(
+    cwd: Option<&Path>,
+) -> anyhow::Result<Option<ProjectLocalSettings>> {
+    let Some(local_path) = project_local_settings_path(cwd).filter(|path| path.exists()) else {
+        return Ok(None);
+    };
+    let content = std::fs::read_to_string(local_path)?;
+    let local_settings = serde_json::from_str(&content)?;
+    Ok(Some(local_settings))
+}
+
+pub fn add_project_local_permission_rule(
+    cwd: Option<&Path>,
+    kind: ProjectPermissionRuleKind,
+    tool_name: &str,
+) -> anyhow::Result<ProjectLocalPermissions> {
+    mutate_project_local_settings(cwd, |local_settings| {
+        let permissions = local_settings
+            .permissions
+            .get_or_insert_with(Default::default);
+        project_permissions_remove(permissions, tool_name);
+        project_permissions_push(permissions.rules_mut(kind), tool_name);
+    })
+    .map(|settings| settings.permissions.unwrap_or_default())
+}
+
+pub fn remove_project_local_permission_rule(
+    cwd: Option<&Path>,
+    kind: ProjectPermissionRuleKind,
+    tool_name: &str,
+) -> anyhow::Result<ProjectLocalPermissions> {
+    mutate_project_local_settings(cwd, |local_settings| {
+        let permissions = local_settings
+            .permissions
+            .get_or_insert_with(Default::default);
+        permissions
+            .rules_mut(kind)
+            .retain(|rule| !rule.eq_ignore_ascii_case(tool_name));
+    })
+    .map(|settings| settings.permissions.unwrap_or_default())
+}
+
+pub fn mutate_project_local_settings<F>(
+    cwd: Option<&Path>,
+    mutate: F,
+) -> anyhow::Result<ProjectLocalSettings>
+where
+    F: FnOnce(&mut ProjectLocalSettings),
+{
     let rustcode_dir = project_rustcode_dir(cwd)
         .ok_or_else(|| anyhow::anyhow!("Unable to determine project-local rustcode directory"))?;
     std::fs::create_dir_all(&rustcode_dir)?;
@@ -369,7 +486,127 @@ pub fn save_project_local_permissions(
         ProjectLocalSettings::default()
     };
 
-    local_settings.permissions = Some(permissions.clone());
+    mutate(&mut local_settings);
     std::fs::write(local_path, serde_json::to_string_pretty(&local_settings)?)?;
-    Ok(())
+    Ok(local_settings)
+}
+
+fn merge_permissions(
+    global: &PermissionsSettings,
+    local: Option<&ProjectLocalPermissions>,
+) -> PermissionsSettings {
+    let Some(local) = local else {
+        return global.clone();
+    };
+
+    PermissionsSettings {
+        mode: local.mode.unwrap_or(global.mode),
+        allow_tools: merge_rule_lists(&global.allow_tools, &local.allow_tools),
+        deny_tools: merge_rule_lists(&global.deny_tools, &local.deny_tools),
+        ask_tools: merge_rule_lists(&global.ask_tools, &local.ask_tools),
+    }
+}
+
+fn merge_session(
+    global: &SessionSettings,
+    local: Option<&ProjectLocalSessionSettings>,
+) -> SessionSettings {
+    let Some(local) = local else {
+        return global.clone();
+    };
+
+    SessionSettings {
+        auto_restore_last_session: local
+            .auto_restore_last_session
+            .unwrap_or(global.auto_restore_last_session),
+        persist_transcript: local
+            .persist_transcript
+            .unwrap_or(global.persist_transcript),
+    }
+}
+
+fn merge_rule_lists(global: &[String], local: &[String]) -> Vec<String> {
+    let mut merged = global.to_vec();
+    for rule in local {
+        project_permissions_push(&mut merged, rule);
+    }
+    merged
+}
+
+fn project_permissions_remove(permissions: &mut ProjectLocalPermissions, tool_name: &str) {
+    permissions
+        .allow_tools
+        .retain(|rule| !rule.eq_ignore_ascii_case(tool_name));
+    permissions
+        .deny_tools
+        .retain(|rule| !rule.eq_ignore_ascii_case(tool_name));
+    permissions
+        .ask_tools
+        .retain(|rule| !rule.eq_ignore_ascii_case(tool_name));
+}
+
+fn project_permissions_push(rules: &mut Vec<String>, tool_name: &str) {
+    if !rules
+        .iter()
+        .any(|rule| rule.eq_ignore_ascii_case(tool_name))
+    {
+        rules.push(tool_name.to_string());
+    }
+}
+
+impl ProjectLocalPermissions {
+    fn rules_mut(&mut self, kind: ProjectPermissionRuleKind) -> &mut Vec<String> {
+        match kind {
+            ProjectPermissionRuleKind::Allow => &mut self.allow_tools,
+            ProjectPermissionRuleKind::Deny => &mut self.deny_tools,
+            ProjectPermissionRuleKind::Ask => &mut self.ask_tools,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merge_permissions_unions_rules_and_prefers_local_mode() {
+        let global = PermissionsSettings {
+            mode: PermissionMode::DenyAll,
+            allow_tools: vec!["file_read".to_string()],
+            deny_tools: vec!["execute_command".to_string()],
+            ask_tools: vec!["search".to_string()],
+        };
+        let local = ProjectLocalPermissions {
+            mode: Some(PermissionMode::Ask),
+            allow_tools: vec!["file_write".to_string()],
+            deny_tools: vec!["file_edit".to_string()],
+            ask_tools: vec!["search".to_string(), "list_files".to_string()],
+            extra: Map::new(),
+        };
+
+        let merged = merge_permissions(&global, Some(&local));
+
+        assert_eq!(merged.mode, PermissionMode::Ask);
+        assert_eq!(merged.allow_tools, vec!["file_read", "file_write"]);
+        assert_eq!(merged.deny_tools, vec!["execute_command", "file_edit"]);
+        assert_eq!(merged.ask_tools, vec!["search", "list_files"]);
+    }
+
+    #[test]
+    fn merge_session_prefers_local_overrides() {
+        let global = SessionSettings {
+            auto_restore_last_session: false,
+            persist_transcript: false,
+        };
+        let local = ProjectLocalSessionSettings {
+            auto_restore_last_session: Some(true),
+            persist_transcript: None,
+            extra: Map::new(),
+        };
+
+        let merged = merge_session(&global, Some(&local));
+
+        assert!(merged.auto_restore_last_session);
+        assert!(!merged.persist_transcript);
+    }
 }

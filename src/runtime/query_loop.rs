@@ -101,6 +101,8 @@ where
                         tool_call_count,
                         status: TurnStatus::Completed,
                         pending_approval: None,
+                        was_compacted: false,
+                        compaction_summary: None,
                     });
                 }
 
@@ -121,6 +123,8 @@ where
                                 tool_call_count,
                                 status: TurnStatus::AwaitingApproval,
                                 pending_approval: Some(PendingApproval { tool_call, reason }),
+                                was_compacted: false,
+                                compaction_summary: None,
                             });
                         }
                     };
@@ -139,6 +143,8 @@ where
                 tool_call_count,
                 status: TurnStatus::Completed,
                 pending_approval: None,
+                was_compacted: false,
+                compaction_summary: None,
             });
         }
 

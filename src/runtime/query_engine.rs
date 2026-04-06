@@ -1,6 +1,9 @@
 use crate::{
     api::ApiClient,
-    config::{project_root_from, save_project_local_permissions, Settings},
+    compact::CompactService,
+    config::{
+        add_project_local_permission_rule, project_root_from, ProjectPermissionRuleKind, Settings,
+    },
     permissions::{PermissionGate, SettingsPermissionGate},
     runtime::{
         query_loop::{GatewayResponse, ModelGateway, QueryLoop},
@@ -19,12 +22,14 @@ use std::path::PathBuf;
 pub struct QueryEngine<G = ApiModelGateway, T = CompositeToolExecutor, P = SettingsPermissionGate> {
     query_loop: QueryLoop<G, T, P>,
     project_root: Option<PathBuf>,
+    compact_service: Option<CompactService>,
 }
 
 impl QueryEngine<ApiModelGateway, CompositeToolExecutor, SettingsPermissionGate> {
     pub fn new(settings: Settings) -> Self {
         let permissions = settings.permissions.clone();
         let mcp_servers = settings.mcp_servers.clone();
+        let compact_service = CompactService::new(settings.clone());
         Self::with_parts(
             ApiModelGateway::new(settings),
             CompositeToolExecutor::new(vec![
@@ -35,6 +40,7 @@ impl QueryEngine<ApiModelGateway, CompositeToolExecutor, SettingsPermissionGate>
             SettingsPermissionGate::new(permissions),
             project_root_from(None),
         )
+        .with_compact_service(compact_service)
     }
 }
 
@@ -48,7 +54,13 @@ impl<G, T, P> QueryEngine<G, T, P> {
         Self {
             query_loop: QueryLoop::new(gateway, tool_executor, permission_gate),
             project_root,
+            compact_service: None,
         }
+    }
+
+    pub fn with_compact_service(mut self, compact_service: CompactService) -> Self {
+        self.compact_service = Some(compact_service);
+        self
     }
 }
 
@@ -77,7 +89,8 @@ where
         history: &[RuntimeMessage],
         message: RuntimeMessage,
     ) -> anyhow::Result<QueryTurnResult> {
-        self.query_loop.submit_turn(history, message).await
+        let result = self.query_loop.submit_turn(history, message).await?;
+        self.apply_auto_compact(result).await
     }
 
     pub async fn submit_text_turn(
@@ -117,19 +130,33 @@ where
 
         match action {
             ApprovalAction::AlwaysAllow(pending) => {
-                let mut gate = self.query_loop.permission_gate().clone();
-                gate.add_allow_rule(&pending.tool_call.name);
-                save_project_local_permissions(self.project_root.as_deref(), gate.settings())?;
+                add_project_local_permission_rule(
+                    self.project_root.as_deref(),
+                    ProjectPermissionRuleKind::Allow,
+                    &pending.tool_call.name,
+                )?;
             }
             ApprovalAction::AlwaysDeny(pending) => {
-                let mut gate = self.query_loop.permission_gate().clone();
-                gate.add_deny_rule(&pending.tool_call.name);
-                save_project_local_permissions(self.project_root.as_deref(), gate.settings())?;
+                add_project_local_permission_rule(
+                    self.project_root.as_deref(),
+                    ProjectPermissionRuleKind::Deny,
+                    &pending.tool_call.name,
+                )?;
             }
             ApprovalAction::AllowOnce(_) | ApprovalAction::DenyOnce(_) => {}
         }
 
-        self.query_loop.resume_turn(history, tool_result).await
+        let result = self.query_loop.resume_turn(history, tool_result).await?;
+        self.apply_auto_compact(result).await
+    }
+}
+
+impl<G, T, P> QueryEngine<G, T, P> {
+    async fn apply_auto_compact(&self, result: QueryTurnResult) -> anyhow::Result<QueryTurnResult> {
+        match &self.compact_service {
+            Some(compact_service) => compact_service.maybe_auto_compact(result).await,
+            None => Ok(result),
+        }
     }
 }
 

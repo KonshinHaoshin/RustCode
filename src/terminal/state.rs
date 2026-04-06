@@ -1,8 +1,9 @@
 use crate::{
-    config::{ApiProvider, FallbackTarget, Settings},
+    config::{ApiProvider, FallbackTarget, ProjectLocalPermissions, Settings},
     onboarding::OnboardingDraft,
+    permissions::{events::PermissionEvent, PermissionsSettings},
     runtime::{PendingApproval, QueryTurnResult, RuntimeMessage, RuntimeRole},
-    session::{Session, SessionManager},
+    session::{Session, SessionInfo, SessionManager, SessionStatus},
     terminal::theme::SPINNER_FRAMES,
 };
 use ratatui::{text::Line, widgets::Paragraph};
@@ -32,6 +33,36 @@ pub struct PendingApprovalViewModel {
     pub pending: PendingApproval,
     pub arguments_preview: String,
     pub focus_index: usize,
+    pub origin: PendingApprovalOrigin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingApprovalOrigin {
+    FreshTurn,
+    RestoredSession,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResumePickerState {
+    pub sessions: Vec<SessionInfo>,
+    pub selected: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionSection {
+    Allow,
+    Deny,
+    Ask,
+    Recent,
+}
+
+#[derive(Debug, Clone)]
+pub struct PermissionsViewState {
+    pub section: PermissionSection,
+    pub selected: usize,
+    pub global_permissions: PermissionsSettings,
+    pub local_permissions: ProjectLocalPermissions,
+    pub recent_events: Vec<PermissionEvent>,
 }
 
 #[derive(Debug)]
@@ -99,6 +130,8 @@ pub struct TerminalState {
     pub conversation_history: Arc<Vec<RuntimeMessage>>,
     pub pending_response: Option<PendingChatRequest>,
     pub pending_approval: Option<PendingApprovalViewModel>,
+    pub resume_picker: Option<ResumePickerState>,
+    pub permissions_view: Option<PermissionsViewState>,
     pub thinking: bool,
     pub initial_prompt: Option<String>,
     pub spinner_tick: usize,
@@ -111,6 +144,8 @@ pub struct TerminalState {
     pub chat_render_dirty: bool,
     pub session_manager: SessionManager,
     pub active_session: Option<Session>,
+    pub active_session_id: Option<String>,
+    pub last_usage_total: Option<usize>,
 }
 
 impl TerminalState {
@@ -128,18 +163,35 @@ impl TerminalState {
         let session_manager = SessionManager::for_working_dir(Some(&working_dir_path));
         let mut restored_session_notice = None;
         let mut active_session = None;
+        let mut active_session_id = None;
         let mut conversation_history = Arc::new(Vec::new());
         let mut messages = Vec::new();
+        let mut pending_approval = None;
 
         if view == ViewMode::Chat
             && settings.session.persist_transcript
             && settings.session.auto_restore_last_session
         {
-            match session_manager.load_latest() {
+            match session_manager.load_latest_resumable() {
                 Ok(Some(session)) => {
                     conversation_history = Arc::new(session.runtime_history());
                     messages = Self::display_messages_from_history(&conversation_history);
-                    restored_session_notice = Some(format!("Restored session {}", session.id));
+                    pending_approval = session.restore_pending_approval().map(|pending| {
+                        PendingApprovalViewModel {
+                            arguments_preview: format_arguments_preview(
+                                &pending.tool_call.arguments,
+                            ),
+                            pending,
+                            focus_index: 0,
+                            origin: PendingApprovalOrigin::RestoredSession,
+                        }
+                    });
+                    restored_session_notice = Some(if pending_approval.is_some() {
+                        format!("Restored session {} with pending approval", session.id)
+                    } else {
+                        format!("Restored session {}", session.id)
+                    });
+                    active_session_id = Some(session.id.clone());
                     active_session = Some(session);
                 }
                 Ok(None) => {}
@@ -177,7 +229,9 @@ impl TerminalState {
             messages,
             conversation_history,
             pending_response: None,
-            pending_approval: None,
+            pending_approval,
+            resume_picker: None,
+            permissions_view: None,
             thinking: false,
             initial_prompt,
             spinner_tick: 0,
@@ -190,6 +244,8 @@ impl TerminalState {
             chat_render_dirty: true,
             session_manager,
             active_session,
+            active_session_id,
+            last_usage_total: None,
         }
     }
 
@@ -320,11 +376,33 @@ impl TerminalState {
         self.refresh_display_messages();
     }
 
+    pub fn reset_conversation(&mut self) {
+        self.input.clear();
+        self.replace_history(Vec::new());
+        self.set_pending_approval(None);
+        self.resume_picker = None;
+        self.permissions_view = None;
+        self.active_session = None;
+        self.active_session_id = None;
+        self.last_usage_total = None;
+        self.scroll_offset = 0;
+        self.thinking = false;
+    }
+
     pub fn set_pending_approval(&mut self, pending: Option<PendingApproval>) {
+        self.set_pending_approval_with_origin(pending, PendingApprovalOrigin::FreshTurn);
+    }
+
+    pub fn set_pending_approval_with_origin(
+        &mut self,
+        pending: Option<PendingApproval>,
+        origin: PendingApprovalOrigin,
+    ) {
         self.pending_approval = pending.map(|pending| PendingApprovalViewModel {
             arguments_preview: format_arguments_preview(&pending.tool_call.arguments),
             pending,
             focus_index: 0,
+            origin,
         });
         self.mark_chat_render_dirty();
     }
@@ -336,14 +414,62 @@ impl TerminalState {
 
         if self.active_session.is_none() {
             self.active_session = Some(self.session_manager.create(Some("tui-session"))?);
+            self.active_session_id = self
+                .active_session
+                .as_ref()
+                .map(|session| session.id.clone());
         }
 
+        let session_status = self.current_session_status();
+        let pending_approval = self
+            .pending_approval
+            .as_ref()
+            .map(|pending| pending.pending.clone());
         if let Some(session) = &mut self.active_session {
-            self.session_manager
-                .save_transcript(session, &self.conversation_history)?;
+            self.session_manager.save_runtime_state(
+                session,
+                &self.conversation_history,
+                session_status,
+                pending_approval.as_ref(),
+            )?;
+            self.active_session_id = Some(session.id.clone());
         }
 
         Ok(())
+    }
+
+    pub fn restore_session(&mut self, session: Session) {
+        self.replace_history(session.runtime_history());
+        self.pending_approval =
+            session
+                .restore_pending_approval()
+                .map(|pending| PendingApprovalViewModel {
+                    arguments_preview: format_arguments_preview(&pending.tool_call.arguments),
+                    pending,
+                    focus_index: 0,
+                    origin: PendingApprovalOrigin::RestoredSession,
+                });
+        self.active_session_id = Some(session.id.clone());
+        self.status = if self.pending_approval.is_some() {
+            format!("Restored session {} with pending approval", session.id)
+        } else {
+            format!("Restored session {}", session.id)
+        };
+        self.active_session = Some(session);
+        self.resume_picker = None;
+        self.permissions_view = None;
+        self.last_usage_total = None;
+        self.mark_chat_render_dirty();
+    }
+
+    pub fn current_session_status(&self) -> SessionStatus {
+        if self.pending_approval.is_some() {
+            SessionStatus::AwaitingApproval
+        } else if self.thinking {
+            SessionStatus::Active
+        } else {
+            SessionStatus::Completed
+        }
     }
 
     fn display_messages_from_history(history: &[RuntimeMessage]) -> Vec<DisplayMessage> {
