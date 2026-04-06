@@ -75,6 +75,7 @@ similar = "2.5"
 
 # Markdown
 pulldown-cmark = "0.10"
+unicode-width = "0.1"
 
 # File operations
 fs_extra = "1.3"

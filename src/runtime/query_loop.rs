@@ -1,9 +1,12 @@
 use crate::permissions::{PermissionDecision, PermissionGate, SettingsPermissionGate};
 use crate::runtime::{
-    results::{PendingApproval, QueryTurnResult, RuntimeUsage, TurnStatus},
+    results::{
+        NoopProgressSink, PendingApproval, ProgressSink, QueryProgressEvent, QueryTurnResult,
+        RuntimeUsage, TurnStatus,
+    },
     types::{RuntimeMessage, RuntimeToolResult},
 };
-use crate::tools_runtime::{ToolDefinition, ToolExecutor};
+use crate::tools_runtime::{ToolDefinition, ToolExecutionContext, ToolExecutor};
 use async_trait::async_trait;
 
 #[derive(Debug, Clone)]
@@ -20,6 +23,7 @@ pub trait ModelGateway: Send + Sync {
         &self,
         messages: &[RuntimeMessage],
         tools: &[ToolDefinition],
+        progress: &mut dyn ProgressSink,
     ) -> anyhow::Result<GatewayResponse>;
 }
 
@@ -58,9 +62,26 @@ where
         history: &[RuntimeMessage],
         user_message: RuntimeMessage,
     ) -> anyhow::Result<QueryTurnResult> {
+        let mut progress = NoopProgressSink;
+        self.submit_turn_with_progress(
+            history,
+            user_message,
+            ToolExecutionContext::default(),
+            &mut progress,
+        )
+        .await
+    }
+
+    pub async fn submit_turn_with_progress(
+        &self,
+        history: &[RuntimeMessage],
+        user_message: RuntimeMessage,
+        context: ToolExecutionContext,
+        progress: &mut dyn ProgressSink,
+    ) -> anyhow::Result<QueryTurnResult> {
         let mut next_history = history.to_vec();
         next_history.push(user_message);
-        self.continue_turn(next_history, 0).await
+        self.continue_turn(next_history, 0, context, progress).await
     }
 
     pub async fn resume_turn(
@@ -68,24 +89,47 @@ where
         history: &[RuntimeMessage],
         tool_result: RuntimeToolResult,
     ) -> anyhow::Result<QueryTurnResult> {
+        let mut progress = NoopProgressSink;
+        self.resume_turn_with_progress(
+            history,
+            tool_result,
+            ToolExecutionContext::default(),
+            &mut progress,
+        )
+        .await
+    }
+
+    pub async fn resume_turn_with_progress(
+        &self,
+        history: &[RuntimeMessage],
+        tool_result: RuntimeToolResult,
+        context: ToolExecutionContext,
+        progress: &mut dyn ProgressSink,
+    ) -> anyhow::Result<QueryTurnResult> {
         let mut next_history = history.to_vec();
         next_history.push(RuntimeMessage::tool_result(tool_result));
         let tool_call_count = next_history
             .iter()
             .map(|message| message.tool_calls.len())
             .sum();
-        self.continue_turn(next_history, tool_call_count).await
+        self.continue_turn(next_history, tool_call_count, context, progress)
+            .await
     }
 
     async fn continue_turn(
         &self,
         mut next_history: Vec<RuntimeMessage>,
         mut tool_call_count: usize,
+        context: ToolExecutionContext,
+        progress: &mut dyn ProgressSink,
     ) -> anyhow::Result<QueryTurnResult> {
         let tools = self.tool_executor.definitions().await;
 
         for _ in 0..8 {
-            let response = self.gateway.complete(&next_history, &tools).await?;
+            let response = self
+                .gateway
+                .complete(&next_history, &tools, progress)
+                .await?;
 
             if let Some(message) = response.assistant_message.clone() {
                 let tool_calls = message.tool_calls.clone();
@@ -108,12 +152,19 @@ where
 
                 tool_call_count += tool_calls.len();
                 for tool_call in tool_calls {
+                    progress.emit(QueryProgressEvent::ToolCall(tool_call.clone()));
                     let result = match self.permission_gate.evaluate_tool_call(&tool_call) {
-                        PermissionDecision::Allow => self.tool_executor.execute(&tool_call).await,
+                        PermissionDecision::Allow => {
+                            self.tool_executor.execute(&tool_call, &context).await
+                        }
                         PermissionDecision::Deny(message) => {
                             SettingsPermissionGate::denied_tool_result(&tool_call, message)
                         }
                         PermissionDecision::Ask(reason) => {
+                            progress.emit(QueryProgressEvent::AwaitingApproval(PendingApproval {
+                                tool_call: tool_call.clone(),
+                                reason: reason.clone(),
+                            }));
                             return Ok(QueryTurnResult {
                                 history: next_history,
                                 assistant_message: Some(message),
@@ -128,6 +179,7 @@ where
                             });
                         }
                     };
+                    progress.emit(QueryProgressEvent::ToolResult(result.clone()));
                     next_history.push(RuntimeMessage::tool_result(result));
                 }
 
@@ -159,10 +211,10 @@ mod tests {
     use super::{GatewayResponse, ModelGateway, QueryLoop};
     use crate::permissions::{PermissionDecision, PermissionGate};
     use crate::runtime::{
-        results::{RuntimeUsage, TurnStatus},
+        results::{ProgressSink, QueryProgressEvent, RuntimeUsage, TurnStatus},
         types::{RuntimeMessage, RuntimeRole, RuntimeToolCall, RuntimeToolResult},
     };
-    use crate::tools_runtime::{ToolDefinition, ToolExecutor};
+    use crate::tools_runtime::{ToolDefinition, ToolExecutionContext, ToolExecutor};
     use async_trait::async_trait;
     use std::sync::{Arc, Mutex};
 
@@ -176,6 +228,7 @@ mod tests {
             &self,
             messages: &[RuntimeMessage],
             _tools: &[ToolDefinition],
+            _progress: &mut dyn ProgressSink,
         ) -> anyhow::Result<GatewayResponse> {
             *self.captured.lock().unwrap() = messages.to_vec();
             Ok(GatewayResponse {
@@ -199,7 +252,11 @@ mod tests {
             Vec::new()
         }
 
-        async fn execute(&self, call: &RuntimeToolCall) -> RuntimeToolResult {
+        async fn execute(
+            &self,
+            call: &RuntimeToolCall,
+            _context: &ToolExecutionContext,
+        ) -> RuntimeToolResult {
             RuntimeToolResult {
                 tool_call_id: call.id.clone(),
                 name: call.name.clone(),
@@ -247,6 +304,7 @@ mod tests {
             &self,
             _messages: &[RuntimeMessage],
             _tools: &[ToolDefinition],
+            _progress: &mut dyn ProgressSink,
         ) -> anyhow::Result<GatewayResponse> {
             Ok(GatewayResponse {
                 assistant_message: None,
@@ -272,6 +330,58 @@ mod tests {
         assert_eq!(result.status, TurnStatus::Completed);
     }
 
+    struct StreamingGateway;
+
+    #[async_trait]
+    impl ModelGateway for StreamingGateway {
+        async fn complete(
+            &self,
+            _messages: &[RuntimeMessage],
+            _tools: &[ToolDefinition],
+            progress: &mut dyn ProgressSink,
+        ) -> anyhow::Result<GatewayResponse> {
+            progress.emit(QueryProgressEvent::ModelRequest {
+                target: "custom/test".to_string(),
+            });
+            progress.emit(QueryProgressEvent::AssistantText("hello".to_string()));
+            Ok(GatewayResponse {
+                assistant_message: Some(RuntimeMessage::assistant("hello")),
+                usage: None,
+                model: "test-model".to_string(),
+                finish_reason: Some("stop".to_string()),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn submit_turn_reports_progress_events() {
+        let loop_ = QueryLoop::new(StreamingGateway, NoopToolExecutor, AllowAllPermissionGate);
+        let mut events = Vec::new();
+
+        let result = loop_
+            .submit_turn_with_progress(
+                &[],
+                RuntimeMessage::user("hi"),
+                ToolExecutionContext::default(),
+                &mut |event| {
+                    events.push(event);
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.assistant_text(), Some("hello"));
+        assert_eq!(
+            events,
+            vec![
+                QueryProgressEvent::ModelRequest {
+                    target: "custom/test".to_string()
+                },
+                QueryProgressEvent::AssistantText("hello".to_string())
+            ]
+        );
+    }
+
     struct ToolLoopGateway {
         step: Arc<Mutex<u8>>,
     }
@@ -282,6 +392,7 @@ mod tests {
             &self,
             messages: &[RuntimeMessage],
             _tools: &[ToolDefinition],
+            _progress: &mut dyn ProgressSink,
         ) -> anyhow::Result<GatewayResponse> {
             let mut step = self.step.lock().unwrap();
             let response = if *step == 0 {
@@ -325,7 +436,11 @@ mod tests {
             }]
         }
 
-        async fn execute(&self, call: &RuntimeToolCall) -> RuntimeToolResult {
+        async fn execute(
+            &self,
+            call: &RuntimeToolCall,
+            _context: &ToolExecutionContext,
+        ) -> RuntimeToolResult {
             self.executed.lock().unwrap().push(call.name.clone());
             RuntimeToolResult {
                 tool_call_id: call.id.clone(),

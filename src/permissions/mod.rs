@@ -1,3 +1,5 @@
+pub mod events;
+
 use crate::runtime::types::{RuntimeToolCall, RuntimeToolResult};
 use serde::{Deserialize, Serialize};
 

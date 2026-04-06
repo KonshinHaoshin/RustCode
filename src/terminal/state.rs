@@ -1,8 +1,9 @@
 use crate::{
+    agents_runtime::AgentTaskStatus,
     config::{ApiProvider, FallbackTarget, ProjectLocalPermissions, Settings},
     onboarding::OnboardingDraft,
     permissions::{events::PermissionEvent, PermissionsSettings},
-    runtime::{PendingApproval, QueryTurnResult, RuntimeMessage, RuntimeRole},
+    runtime::{PendingApproval, QueryProgressEvent, QueryTurnResult, RuntimeMessage, RuntimeRole},
     session::{Session, SessionInfo, SessionManager, SessionStatus},
     terminal::theme::SPINNER_FRAMES,
 };
@@ -14,18 +15,33 @@ use std::{
 
 const SPINNER_INTERVAL: Duration = Duration::from_millis(120);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DisplayRole {
     User,
     Assistant,
+    Thinking,
     System,
     Tool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranscriptViewMode {
+    Main,
+    Transcript,
 }
 
 #[derive(Debug, Clone)]
 pub struct DisplayMessage {
     pub role: DisplayRole,
     pub content: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskProgressItem {
+    pub id: String,
+    pub subject: String,
+    pub agent_type: String,
+    pub status: AgentTaskStatus,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,10 +94,15 @@ pub struct PendingApprovalViewModel {
     pub origin: PendingApprovalOrigin,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PendingApprovalOrigin {
     FreshTurn,
     RestoredSession,
+    ChildTask {
+        task_id: String,
+        child_session_id: String,
+        subject: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -109,12 +130,24 @@ pub struct PermissionsViewState {
 
 #[derive(Debug)]
 pub struct ChatWorkerResult {
-    pub turn: anyhow::Result<QueryTurnResult>,
+    pub outcome: anyhow::Result<ChatWorkerOutcome>,
+}
+
+#[derive(Debug)]
+pub enum ChatWorkerOutcome {
+    Turn(QueryTurnResult),
+    TaskResume { message: String },
+}
+
+#[derive(Debug)]
+pub enum ChatWorkerUpdate {
+    Progress(QueryProgressEvent),
+    Finished(ChatWorkerResult),
 }
 
 #[derive(Debug)]
 pub struct PendingChatRequest {
-    pub receiver: Receiver<ChatWorkerResult>,
+    pub receiver: Receiver<ChatWorkerUpdate>,
     pub base_history: Arc<Vec<RuntimeMessage>>,
     pub user_message: Option<RuntimeMessage>,
 }
@@ -175,6 +208,8 @@ pub struct TerminalState {
     pub resume_picker: Option<ResumePickerState>,
     pub permissions_view: Option<PermissionsViewState>,
     pub thinking: bool,
+    pub transcript_mode: TranscriptViewMode,
+    pub verbose_transcript: bool,
     pub initial_prompt: Option<String>,
     pub spinner_tick: usize,
     pub last_tick: Instant,
@@ -195,6 +230,9 @@ pub struct TerminalState {
     pub active_session: Option<Session>,
     pub active_session_id: Option<String>,
     pub last_usage_total: Option<usize>,
+    pub live_assistant_message: Option<usize>,
+    pub live_thinking_message: Option<usize>,
+    pub active_tasks: Vec<TaskProgressItem>,
 }
 
 impl TerminalState {
@@ -282,6 +320,8 @@ impl TerminalState {
             resume_picker: None,
             permissions_view: None,
             thinking: false,
+            transcript_mode: TranscriptViewMode::Main,
+            verbose_transcript: false,
             initial_prompt,
             spinner_tick: 0,
             last_tick: Instant::now(),
@@ -302,6 +342,9 @@ impl TerminalState {
             active_session,
             active_session_id,
             last_usage_total: None,
+            live_assistant_message: None,
+            live_thinking_message: None,
+            active_tasks: Vec::new(),
         }
     }
 
@@ -429,6 +472,8 @@ impl TerminalState {
 
     pub fn replace_history(&mut self, history: Vec<RuntimeMessage>) {
         self.conversation_history = Arc::new(history);
+        self.live_assistant_message = None;
+        self.live_thinking_message = None;
         self.clear_selection();
         self.refresh_display_messages();
     }
@@ -442,6 +487,11 @@ impl TerminalState {
         self.active_session = None;
         self.active_session_id = None;
         self.last_usage_total = None;
+        self.transcript_mode = TranscriptViewMode::Main;
+        self.verbose_transcript = false;
+        self.live_assistant_message = None;
+        self.live_thinking_message = None;
+        self.active_tasks.clear();
         self.scroll_offset = 0;
         self.thinking = false;
         self.clear_selection();
@@ -479,10 +529,15 @@ impl TerminalState {
         }
 
         let session_status = self.current_session_status();
-        let pending_approval = self
-            .pending_approval
-            .as_ref()
-            .map(|pending| pending.pending.clone());
+        let pending_approval =
+            self.pending_approval
+                .as_ref()
+                .and_then(|pending| match pending.origin {
+                    PendingApprovalOrigin::FreshTurn | PendingApprovalOrigin::RestoredSession => {
+                        Some(pending.pending.clone())
+                    }
+                    PendingApprovalOrigin::ChildTask { .. } => None,
+                });
         if let Some(session) = &mut self.active_session {
             self.session_manager.save_runtime_state(
                 session,
@@ -517,7 +572,15 @@ impl TerminalState {
         self.resume_picker = None;
         self.permissions_view = None;
         self.last_usage_total = None;
+        self.live_assistant_message = None;
+        self.live_thinking_message = None;
+        self.active_tasks.clear();
         self.clear_selection();
+        self.mark_chat_render_dirty();
+    }
+
+    pub fn set_active_tasks(&mut self, tasks: Vec<TaskProgressItem>) {
+        self.active_tasks = tasks;
         self.mark_chat_render_dirty();
     }
 
@@ -598,8 +661,48 @@ impl TerminalState {
         Some(parts.join("\n"))
     }
 
+    pub fn append_streaming_assistant_text(&mut self, chunk: &str) {
+        self.append_streaming_message_for_role(DisplayRole::Assistant, chunk);
+    }
+
+    pub fn append_streaming_thinking_text(&mut self, chunk: &str) {
+        self.append_streaming_message_for_role(DisplayRole::Thinking, chunk);
+    }
+
+    fn append_streaming_message_for_role(&mut self, role: DisplayRole, chunk: &str) {
+        if chunk.is_empty() {
+            return;
+        }
+
+        let live_index = match role {
+            DisplayRole::Assistant => &mut self.live_assistant_message,
+            DisplayRole::Thinking => &mut self.live_thinking_message,
+            _ => return,
+        };
+
+        let index = match *live_index {
+            Some(index) => index,
+            None => {
+                self.messages.push(DisplayMessage {
+                    role,
+                    content: String::new(),
+                });
+                let index = self.messages.len().saturating_sub(1);
+                *live_index = Some(index);
+                index
+            }
+        };
+
+        if let Some(message) = self.messages.get_mut(index) {
+            message.content.push_str(chunk);
+            self.mark_chat_render_dirty();
+        }
+    }
+
     pub fn current_session_status(&self) -> SessionStatus {
-        if self.pending_approval.is_some() {
+        if self.pending_approval.as_ref().is_some_and(|pending| {
+            !matches!(pending.origin, PendingApprovalOrigin::ChildTask { .. })
+        }) {
             SessionStatus::AwaitingApproval
         } else if self.thinking {
             SessionStatus::Active
@@ -662,7 +765,7 @@ impl TerminalState {
     }
 }
 
-fn format_arguments_preview(arguments: &serde_json::Value) -> String {
+pub(crate) fn format_arguments_preview(arguments: &serde_json::Value) -> String {
     let pretty = serde_json::to_string_pretty(arguments)
         .unwrap_or_else(|_| arguments.to_string())
         .replace('\r', "");
@@ -675,7 +778,7 @@ fn format_arguments_preview(arguments: &serde_json::Value) -> String {
     preview
 }
 
-fn format_tool_body(content: &str) -> String {
+pub(crate) fn format_tool_body(content: &str) -> String {
     if content.trim().is_empty() {
         String::new()
     } else {
@@ -702,5 +805,17 @@ mod tests {
         });
 
         assert_eq!(state.selection_text().as_deref(), Some("world\nsecond"));
+    }
+
+    #[test]
+    fn append_streaming_assistant_text_reuses_live_message() {
+        let mut state = TerminalState::new(Settings::default(), None);
+
+        state.append_streaming_assistant_text("hel");
+        state.append_streaming_assistant_text("lo");
+
+        assert_eq!(state.live_assistant_message, Some(0));
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[0].content, "hello");
     }
 }

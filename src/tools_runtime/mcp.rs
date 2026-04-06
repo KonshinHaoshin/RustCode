@@ -1,7 +1,7 @@
 use crate::{
     mcp,
     runtime::types::{RuntimeToolCall, RuntimeToolResult},
-    tools_runtime::{ToolDefinition, ToolExecutor},
+    tools_runtime::{ToolDefinition, ToolExecutionContext, ToolExecutor},
 };
 use async_trait::async_trait;
 use std::sync::{Arc, OnceLock};
@@ -137,7 +137,11 @@ impl ToolExecutor for McpToolExecutor {
         Self::static_definitions()
     }
 
-    async fn execute(&self, call: &RuntimeToolCall) -> RuntimeToolResult {
+    async fn execute(
+        &self,
+        call: &RuntimeToolCall,
+        _context: &ToolExecutionContext,
+    ) -> RuntimeToolResult {
         let Some(name) = Self::to_mcp_name(&call.name) else {
             return RuntimeToolResult {
                 tool_call_id: call.id.clone(),

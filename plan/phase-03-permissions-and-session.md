@@ -7,6 +7,7 @@
 ## Completed
 
 - 新增 `src/permissions/mod.rs`
+- 新增 `src/permissions/events.rs`
 - 新增权限配置模型：
   - `PermissionMode`
   - `PermissionsSettings`
@@ -20,8 +21,11 @@
   - `session.auto_restore_last_session`
   - `session.persist_transcript`
 - 配置读取现在会合并项目本地 `./rustcode/settings.local.json`
+- 项目本地与全局配置现在按字段做 source-aware merge，而不是整块覆盖
 - 新增项目本地 `./rustcode/` 目录语义，对标 Claude Code 的 `.claude/`
+- 新增 `./rustcode/state/permission-events.json`，记录最近的 deny / ask-deny 事件
 - `always allow` / `always deny` 现在会把规则写入 `./rustcode/settings.local.json`
+- `always allow` / `always deny` 现在只写 project-local 规则，不再把合并后的全局权限整包写回本地
 - runtime 工具执行前现在会经过 `PermissionGate`
 - `ask` 不再直接变成拒绝型 tool result，而是会返回 `AwaitingApproval`
 - `QueryEngine` 已支持 `resume_after_approval(...)`
@@ -33,21 +37,32 @@
 - `src/session/mod.rs` 已升级为 runtime transcript store，持久化 `RuntimeMessage` / tool call / tool result
 - TUI 会把 session 保存到项目本地 `./rustcode/sessions/`
 - TUI 启动时会恢复最近 transcript session
+- session schema 现在包含：
+  - `status`
+  - `pending_approval`
+  - `project_root`
+  - `entry_type`
+- TUI 现在可以跨进程恢复“未决审批卡片”
+- TUI 现在支持最小本地命令：
+  - `/resume`
+  - `/resume <session-id>`
+  - `/permissions`
+- `/permissions` 现在可以查看 global/local 规则来源，删除 local rule，并把 recent event 提升为 allow/deny/ask
 - `query` / REPL / agent service 遇到 `AwaitingApproval` 时会返回明确提示，而不是假装成功
 
 ## Remaining
 
 - 更丰富的规则匹配能力
-- 跨进程恢复“未决审批卡片”
 - GUI 审批流
 - 更完整的 session 命名/索引/搜索
 - Claude Code 风格更细的审批界面和工具进度展示
 
 ## Risks / Blockers
 
-- `Settings::load()` 当前会把项目本地权限/session 覆盖合并到运行时设置里，但 `save()` 仍然是全局保存路径，后续需要进一步把“全局保存”和“本地覆盖”完全分层
-- 测试编译依旧被当前 Windows 环境的 `os error 5` 阻塞，无法完成 `cargo test`
+- `Settings::save()` 仍然是全局保存路径；虽然项目本地权限现在有单独 helper，但更彻底的 local/global 分层仍值得继续收敛
+- 这台 Windows 环境里针对 test target 的 `rustc` 调用仍然频繁触发 `os error 5`，导致新增单元测试无法稳定执行
+- 仓库现有完整测试套件里还存在一个与本次改动无关的 i18n 断言失败：`i18n::translator::tests::test_translate`
 
 ## Next
 
-继续补 Phase 3 剩余边角，并准备进入 Phase 4 的输入预处理 / slash commands。
+进入 Phase 4，开始实现 Claude Code 风格的输入预处理、本地 slash commands 扩展和 compact/token-budget 基础设施。

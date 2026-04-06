@@ -1,6 +1,6 @@
 use crate::{
     runtime::types::{RuntimeToolCall, RuntimeToolResult},
-    tools_runtime::{ToolDefinition, ToolExecutor},
+    tools_runtime::{ToolDefinition, ToolExecutionContext, ToolExecutor},
 };
 use async_trait::async_trait;
 use std::collections::BTreeMap;
@@ -27,7 +27,11 @@ impl ToolExecutor for CompositeToolExecutor {
         definitions.into_values().collect()
     }
 
-    async fn execute(&self, call: &RuntimeToolCall) -> RuntimeToolResult {
+    async fn execute(
+        &self,
+        call: &RuntimeToolCall,
+        context: &ToolExecutionContext,
+    ) -> RuntimeToolResult {
         for executor in &self.executors {
             if executor
                 .definitions()
@@ -35,7 +39,7 @@ impl ToolExecutor for CompositeToolExecutor {
                 .iter()
                 .any(|definition| definition.name == call.name)
             {
-                return executor.execute(call).await;
+                return executor.execute(call, context).await;
             }
         }
 

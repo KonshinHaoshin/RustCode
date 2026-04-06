@@ -7,12 +7,12 @@ use crate::{
     permissions::{PermissionGate, SettingsPermissionGate},
     runtime::{
         query_loop::{GatewayResponse, ModelGateway, QueryLoop},
-        results::{ApprovalAction, QueryTurnResult, RuntimeUsage},
+        results::{ApprovalAction, NoopProgressSink, ProgressSink, QueryTurnResult, RuntimeUsage},
         types::RuntimeMessage,
     },
     tools_runtime::{
         BuiltinToolExecutor, CompositeToolExecutor, ExternalMcpToolExecutor, McpToolExecutor,
-        ToolDefinition, ToolExecutor,
+        ToolDefinition, ToolExecutionContext, ToolExecutor,
     },
     PermissionsSettings,
 };
@@ -30,15 +30,19 @@ impl QueryEngine<ApiModelGateway, CompositeToolExecutor, SettingsPermissionGate>
         let permissions = settings.permissions.clone();
         let mcp_servers = settings.mcp_servers.clone();
         let compact_service = CompactService::new(settings.clone());
+        let project_root = project_root_from(None);
         Self::with_parts(
-            ApiModelGateway::new(settings),
+            ApiModelGateway::new(settings.clone()),
             CompositeToolExecutor::new(vec![
-                Box::new(BuiltinToolExecutor::new()),
+                Box::new(BuiltinToolExecutor::new(
+                    settings.clone(),
+                    project_root.clone(),
+                )),
                 Box::new(McpToolExecutor::new()),
                 Box::new(ExternalMcpToolExecutor::new(mcp_servers)),
             ]),
             SettingsPermissionGate::new(permissions),
-            project_root_from(None),
+            project_root,
         )
         .with_compact_service(compact_service)
     }
@@ -69,7 +73,10 @@ impl<G> QueryEngine<G, CompositeToolExecutor, SettingsPermissionGate> {
         Self::with_parts(
             gateway,
             CompositeToolExecutor::new(vec![
-                Box::new(BuiltinToolExecutor::new()),
+                Box::new(BuiltinToolExecutor::new(
+                    Settings::default(),
+                    project_root_from(None),
+                )),
                 Box::new(McpToolExecutor::new()),
             ]),
             SettingsPermissionGate::new(permissions),
@@ -89,7 +96,37 @@ where
         history: &[RuntimeMessage],
         message: RuntimeMessage,
     ) -> anyhow::Result<QueryTurnResult> {
-        let result = self.query_loop.submit_turn(history, message).await?;
+        let mut progress = NoopProgressSink;
+        self.submit_message_with_progress(history, message, &mut progress)
+            .await
+    }
+
+    pub async fn submit_message_with_progress(
+        &self,
+        history: &[RuntimeMessage],
+        message: RuntimeMessage,
+        progress: &mut dyn ProgressSink,
+    ) -> anyhow::Result<QueryTurnResult> {
+        self.submit_message_with_context_and_progress(history, message, None, progress)
+            .await
+    }
+
+    pub async fn submit_message_with_context_and_progress(
+        &self,
+        history: &[RuntimeMessage],
+        message: RuntimeMessage,
+        session_id: Option<String>,
+        progress: &mut dyn ProgressSink,
+    ) -> anyhow::Result<QueryTurnResult> {
+        let result = self
+            .query_loop
+            .submit_turn_with_progress(
+                history,
+                message,
+                ToolExecutionContext { session_id },
+                progress,
+            )
+            .await?;
         self.apply_auto_compact(result).await
     }
 
@@ -100,6 +137,22 @@ where
     ) -> anyhow::Result<QueryTurnResult> {
         self.submit_message(history, RuntimeMessage::user(prompt))
             .await
+    }
+
+    pub async fn submit_text_turn_with_context(
+        &self,
+        history: &[RuntimeMessage],
+        prompt: impl Into<String>,
+        session_id: Option<String>,
+    ) -> anyhow::Result<QueryTurnResult> {
+        let mut progress = NoopProgressSink;
+        self.submit_message_with_context_and_progress(
+            history,
+            RuntimeMessage::user(prompt),
+            session_id,
+            &mut progress,
+        )
+        .await
     }
 }
 
@@ -113,11 +166,38 @@ where
         history: &[RuntimeMessage],
         action: ApprovalAction,
     ) -> anyhow::Result<QueryTurnResult> {
+        let mut progress = NoopProgressSink;
+        self.resume_after_approval_with_progress(history, action, &mut progress)
+            .await
+    }
+
+    pub async fn resume_after_approval_with_progress(
+        &self,
+        history: &[RuntimeMessage],
+        action: ApprovalAction,
+        progress: &mut dyn ProgressSink,
+    ) -> anyhow::Result<QueryTurnResult> {
+        self.resume_after_approval_with_context_and_progress(history, action, None, progress)
+            .await
+    }
+
+    pub async fn resume_after_approval_with_context_and_progress(
+        &self,
+        history: &[RuntimeMessage],
+        action: ApprovalAction,
+        session_id: Option<String>,
+        progress: &mut dyn ProgressSink,
+    ) -> anyhow::Result<QueryTurnResult> {
         let tool_result = match &action {
             ApprovalAction::AllowOnce(pending) | ApprovalAction::AlwaysAllow(pending) => {
                 self.query_loop
                     .tool_executor()
-                    .execute(&pending.tool_call)
+                    .execute(
+                        &pending.tool_call,
+                        &ToolExecutionContext {
+                            session_id: session_id.clone(),
+                        },
+                    )
                     .await
             }
             ApprovalAction::DenyOnce(pending) | ApprovalAction::AlwaysDeny(pending) => {
@@ -146,7 +226,18 @@ where
             ApprovalAction::AllowOnce(_) | ApprovalAction::DenyOnce(_) => {}
         }
 
-        let result = self.query_loop.resume_turn(history, tool_result).await?;
+        progress.emit(crate::runtime::QueryProgressEvent::ToolResult(
+            tool_result.clone(),
+        ));
+        let result = self
+            .query_loop
+            .resume_turn_with_progress(
+                history,
+                tool_result,
+                ToolExecutionContext { session_id },
+                progress,
+            )
+            .await?;
         self.apply_auto_compact(result).await
     }
 }
@@ -178,12 +269,16 @@ impl ModelGateway for ApiModelGateway {
         &self,
         messages: &[RuntimeMessage],
         tools: &[ToolDefinition],
+        progress: &mut dyn ProgressSink,
     ) -> anyhow::Result<GatewayResponse> {
         let api_messages = messages
             .iter()
             .map(crate::api::ChatMessage::from)
             .collect::<Vec<_>>();
-        let response = self.client.chat_with_tools(&api_messages, tools).await?;
+        let response = self
+            .client
+            .chat_with_tools_and_progress(&api_messages, tools, progress)
+            .await?;
         let choice = response.choices.first().cloned();
 
         Ok(GatewayResponse {

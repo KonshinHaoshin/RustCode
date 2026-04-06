@@ -1,13 +1,22 @@
 use super::{
+    markdown::ChatRenderLine,
     state::{
-        ChatWorkerResult, DisplayMessage, DisplayRole, FallbackField, OnboardingStep,
+        format_arguments_preview, format_tool_body, ChatWorkerOutcome, ChatWorkerResult,
+        ChatWorkerUpdate, DisplayMessage, DisplayRole, FallbackField, OnboardingStep,
         PendingChatRequest, PermissionSection, PermissionsViewState, PrimaryField,
-        ResumePickerState, SelectionClickState, SelectionMode, SelectionPoint, TerminalState,
-        ViewMode,
+        ResumePickerState, SelectionClickState, SelectionMode, SelectionPoint, TaskProgressItem,
+        TerminalState, TranscriptViewMode, ViewMode,
     },
-    theme::{TerminalTheme, BLACK_CIRCLE, GUTTER},
+    theme::{TerminalTheme, BLACK_CIRCLE},
+    ui::{
+        layout::{split_chat_screen, split_onboarding_screen},
+        messages::{push_wrapped_line, render_render_block},
+        render_model::build_render_blocks as build_ui_render_blocks,
+    },
 };
 use crate::{
+    agents_runtime::{resume_agent_task_after_approval, AgentTaskStore},
+    compact::is_compact_summary_content,
     compact::CompactService,
     config::{
         add_project_local_permission_rule, load_project_local_settings,
@@ -17,7 +26,10 @@ use crate::{
     input::{format_help_text, format_status_text, InputProcessor, LocalCommand, ProcessedInput},
     onboarding::OnboardingDraft,
     permissions::events::{PermissionEvent, PermissionEventStore},
-    runtime::{ApprovalAction, QueryEngine, QueryTurnResult, RuntimeMessage, TurnStatus},
+    runtime::{
+        ApprovalAction, QueryEngine, QueryProgressEvent, QueryTurnResult, RuntimeMessage,
+        TurnStatus,
+    },
     session::SessionInfo,
 };
 use crossterm::{
@@ -30,7 +42,7 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Alignment, Constraint, Direction, Layout},
+    layout::Alignment,
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
@@ -49,6 +61,10 @@ pub struct TerminalApp {
     state: TerminalState,
     theme: TerminalTheme,
 }
+
+const MAX_VISIBLE_TRANSCRIPT_MESSAGES: usize = 80;
+const MAX_TRANSCRIPT_MODE_MESSAGES: usize = 240;
+const THINKING_PREVIEW_CHARS: usize = 0;
 
 impl TerminalApp {
     pub fn new(settings: Settings, initial_prompt: Option<String>) -> anyhow::Result<Self> {
@@ -71,6 +87,8 @@ impl TerminalApp {
         loop {
             let mut state_changed = false;
             state_changed |= self.poll_pending_response();
+            state_changed |= self.poll_task_notifications();
+            state_changed |= self.refresh_active_task_progress();
             state_changed |= self.state.tick_spinner();
             state_changed |= self.clear_exit_confirmation_if_stale();
 
@@ -155,6 +173,19 @@ impl TerminalApp {
             }
             Event::Mouse(mouse) => {
                 if self.state.view == ViewMode::Chat {
+                    let old_offset = self.state.scroll_offset;
+                    match mouse.kind {
+                        MouseEventKind::ScrollDown => {
+                            self.state.scroll_offset = self.state.scroll_offset.saturating_sub(3);
+                            return Ok(self.state.scroll_offset != old_offset);
+                        }
+                        MouseEventKind::ScrollUp => {
+                            self.state.scroll_offset = self.state.scroll_offset.saturating_add(3);
+                            return Ok(self.state.scroll_offset != old_offset);
+                        }
+                        _ => {}
+                    }
+
                     if let Some(point) =
                         selection_point_for_mouse(&self.state, mouse.column, mouse.row)
                     {
@@ -216,18 +247,6 @@ impl TerminalApp {
                             _ => {}
                         }
                     }
-
-                    let old_offset = self.state.scroll_offset;
-                    match mouse.kind {
-                        MouseEventKind::ScrollDown => {
-                            self.state.scroll_offset = self.state.scroll_offset.saturating_sub(3);
-                        }
-                        MouseEventKind::ScrollUp => {
-                            self.state.scroll_offset = self.state.scroll_offset.saturating_add(3);
-                        }
-                        _ => {}
-                    }
-                    return Ok(self.state.scroll_offset != old_offset);
                 }
                 Ok(false)
             }
@@ -250,6 +269,81 @@ impl TerminalApp {
         }
 
         match key.code {
+            KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.state.transcript_mode = match self.state.transcript_mode {
+                    TranscriptViewMode::Main => TranscriptViewMode::Transcript,
+                    TranscriptViewMode::Transcript => TranscriptViewMode::Main,
+                };
+                self.state.scroll_offset = 0;
+                self.state.status = match self.state.transcript_mode {
+                    TranscriptViewMode::Main => "Returned to main chat view.".to_string(),
+                    TranscriptViewMode::Transcript => "Opened transcript view.".to_string(),
+                };
+                self.state.mark_chat_render_dirty();
+                true
+            }
+            KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.state.verbose_transcript = !self.state.verbose_transcript;
+                self.state.status = if self.state.verbose_transcript {
+                    "Verbose transcript enabled.".to_string()
+                } else {
+                    "Verbose transcript disabled.".to_string()
+                };
+                self.state.mark_chat_render_dirty();
+                true
+            }
+            KeyCode::Char('v')
+                if self.state.transcript_mode == TranscriptViewMode::Transcript
+                    && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.state.verbose_transcript = !self.state.verbose_transcript;
+                self.state.status = if self.state.verbose_transcript {
+                    "Verbose transcript enabled.".to_string()
+                } else {
+                    "Verbose transcript disabled.".to_string()
+                };
+                self.state.mark_chat_render_dirty();
+                true
+            }
+            KeyCode::Up if self.state.transcript_mode == TranscriptViewMode::Transcript => {
+                let old_offset = self.state.scroll_offset;
+                self.state.scroll_offset = self.state.scroll_offset.saturating_add(1);
+                self.state.scroll_offset != old_offset
+            }
+            KeyCode::Down if self.state.transcript_mode == TranscriptViewMode::Transcript => {
+                let old_offset = self.state.scroll_offset;
+                self.state.scroll_offset = self.state.scroll_offset.saturating_sub(1);
+                self.state.scroll_offset != old_offset
+            }
+            KeyCode::PageUp if self.state.transcript_mode == TranscriptViewMode::Transcript => {
+                let old_offset = self.state.scroll_offset;
+                self.state.scroll_offset = self.state.scroll_offset.saturating_add(12);
+                self.state.scroll_offset != old_offset
+            }
+            KeyCode::PageDown if self.state.transcript_mode == TranscriptViewMode::Transcript => {
+                let old_offset = self.state.scroll_offset;
+                self.state.scroll_offset = self.state.scroll_offset.saturating_sub(12);
+                self.state.scroll_offset != old_offset
+            }
+            KeyCode::Home if self.state.transcript_mode == TranscriptViewMode::Transcript => {
+                self.state.scroll_offset = usize::MAX / 4;
+                true
+            }
+            KeyCode::End if self.state.transcript_mode == TranscriptViewMode::Transcript => {
+                let changed = self.state.scroll_offset != 0;
+                self.state.scroll_offset = 0;
+                changed
+            }
+            KeyCode::Char('k') if self.state.transcript_mode == TranscriptViewMode::Transcript => {
+                let old_offset = self.state.scroll_offset;
+                self.state.scroll_offset = self.state.scroll_offset.saturating_add(1);
+                self.state.scroll_offset != old_offset
+            }
+            KeyCode::Char('j') if self.state.transcript_mode == TranscriptViewMode::Transcript => {
+                let old_offset = self.state.scroll_offset;
+                self.state.scroll_offset = self.state.scroll_offset.saturating_sub(1);
+                self.state.scroll_offset != old_offset
+            }
             KeyCode::Enter => {
                 if key.modifiers.contains(KeyModifiers::SHIFT) {
                     self.state.input.push('\n');
@@ -272,6 +366,13 @@ impl TerminalApp {
             KeyCode::Esc => {
                 if self.state.has_selection() {
                     self.state.clear_selection();
+                    self.state.mark_chat_render_dirty();
+                    return true;
+                }
+                if self.state.transcript_mode == TranscriptViewMode::Transcript {
+                    self.state.transcript_mode = TranscriptViewMode::Main;
+                    self.state.scroll_offset = 0;
+                    self.state.status = "Returned to main chat view.".to_string();
                     self.state.mark_chat_render_dirty();
                     return true;
                 }
@@ -743,6 +844,7 @@ impl TerminalApp {
                 self.state.settings.clone(),
                 Arc::clone(&base_history),
                 user_message.clone(),
+                self.state.active_session_id.clone(),
             ),
             base_history,
             user_message: Some(user_message),
@@ -976,44 +1078,111 @@ impl TerminalApp {
         let Some(pending) = self.state.pending_response.take() else {
             return false;
         };
-        match pending.receiver.try_recv() {
-            Ok(ChatWorkerResult { turn }) => {
-                self.state.thinking = false;
-                match turn {
-                    Ok(turn) => self.apply_turn_result(turn),
-                    Err(error) => {
-                        let mut history = (*pending.base_history).clone();
-                        if let Some(user_message) = pending.user_message {
-                            history.push(user_message);
+        let mut pending = pending;
+        let mut changed = false;
+
+        loop {
+            match pending.receiver.try_recv() {
+                Ok(ChatWorkerUpdate::Progress(event)) => {
+                    self.apply_progress_event(event);
+                    changed = true;
+                }
+                Ok(ChatWorkerUpdate::Finished(ChatWorkerResult { outcome })) => {
+                    self.state.thinking = false;
+                    match outcome {
+                        Ok(ChatWorkerOutcome::Turn(turn)) => self.apply_turn_result(turn),
+                        Ok(ChatWorkerOutcome::TaskResume { message }) => {
+                            self.push_system_message(message);
+                            self.state.status = "Child task resumed.".to_string();
                         }
-                        self.state.replace_history(history);
-                        self.state.messages.push(DisplayMessage {
-                            role: DisplayRole::System,
-                            content: format!("Request failed: {}", error),
-                        });
-                        self.state.status = "Request failed.".to_string();
+                        Err(error) => {
+                            let had_user_message = pending.user_message.is_some();
+                            let mut history = (*pending.base_history).clone();
+                            if let Some(user_message) = pending.user_message.take() {
+                                history.push(user_message);
+                            }
+                            if had_user_message {
+                                self.state.replace_history(history);
+                            }
+                            self.state.messages.push(DisplayMessage {
+                                role: DisplayRole::System,
+                                content: format!("Request failed: {}", error),
+                            });
+                            self.state.status = "Request failed.".to_string();
+                        }
                     }
+                    return true;
                 }
-                true
-            }
-            Err(mpsc::TryRecvError::Empty) => {
-                self.state.pending_response = Some(pending);
-                false
-            }
-            Err(mpsc::TryRecvError::Disconnected) => {
-                let mut restored_history = (*pending.base_history).clone();
-                if let Some(user_message) = pending.user_message {
-                    restored_history.push(user_message);
+                Err(mpsc::TryRecvError::Empty) => {
+                    self.state.pending_response = Some(pending);
+                    return changed;
                 }
-                self.state.replace_history(restored_history);
-                self.state.thinking = false;
-                self.state.status = "Request worker disconnected.".to_string();
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    let mut restored_history = (*pending.base_history).clone();
+                    if let Some(user_message) = pending.user_message.take() {
+                        restored_history.push(user_message);
+                    }
+                    self.state.replace_history(restored_history);
+                    self.state.thinking = false;
+                    self.state.status = "Request worker disconnected.".to_string();
+                    self.state.messages.push(DisplayMessage {
+                        role: DisplayRole::System,
+                        content: "Request worker disconnected.".to_string(),
+                    });
+                    self.state.mark_chat_render_dirty();
+                    return true;
+                }
+            }
+        }
+    }
+
+    fn apply_progress_event(&mut self, event: QueryProgressEvent) {
+        match event {
+            QueryProgressEvent::ModelRequest { target } => {
+                self.state.status = format!("Querying {}", target);
+            }
+            QueryProgressEvent::ThinkingText(chunk) => {
+                self.state.append_streaming_thinking_text(&chunk);
+                self.state.status = "Streaming reasoning…".to_string();
+            }
+            QueryProgressEvent::AssistantText(chunk) => {
+                self.state.append_streaming_assistant_text(&chunk);
+                self.state.live_thinking_message = None;
+            }
+            QueryProgressEvent::ToolCall(tool_call) => {
+                self.state.live_assistant_message = None;
+                self.state.live_thinking_message = None;
                 self.state.messages.push(DisplayMessage {
-                    role: DisplayRole::System,
-                    content: "Request worker disconnected.".to_string(),
+                    role: DisplayRole::Tool,
+                    content: format!(
+                        "Tool request: {} {}",
+                        tool_call.name,
+                        format_arguments_preview(&tool_call.arguments)
+                    ),
                 });
+                self.state.status = format!("Running tool {}.", tool_call.name);
                 self.state.mark_chat_render_dirty();
-                true
+            }
+            QueryProgressEvent::ToolResult(result) => {
+                self.state.live_assistant_message = None;
+                self.state.live_thinking_message = None;
+                let label = if result.is_error {
+                    format!("Tool error: {}", result.name)
+                } else {
+                    format!("Tool result: {}", result.name)
+                };
+                self.state.messages.push(DisplayMessage {
+                    role: DisplayRole::Tool,
+                    content: format!("{}{}", label, format_tool_body(&result.content)),
+                });
+                self.state.status = format!("Completed tool {}.", result.name);
+                self.state.mark_chat_render_dirty();
+            }
+            QueryProgressEvent::AwaitingApproval(pending) => {
+                self.state.live_assistant_message = None;
+                self.state.live_thinking_message = None;
+                self.state.status =
+                    format!("Tool approval required for {}.", pending.tool_call.name);
             }
         }
     }
@@ -1173,6 +1342,7 @@ impl TerminalApp {
             ApprovalSelection::AlwaysDeny => ApprovalAction::AlwaysDeny(view_model.pending),
         };
 
+        let pending_origin = view_model.origin.clone();
         self.state.thinking = true;
         self.state.status = "Resuming after approval…".to_string();
         self.state.set_pending_approval(None);
@@ -1185,15 +1355,150 @@ impl TerminalApp {
             });
         }
         let base_history = Arc::clone(&self.state.conversation_history);
-        self.state.pending_response = Some(PendingChatRequest {
-            receiver: spawn_approval_request(
+        let receiver = match pending_origin {
+            super::state::PendingApprovalOrigin::ChildTask { task_id, .. } => {
+                spawn_task_approval_request(self.state.settings.clone(), task_id, action)
+            }
+            super::state::PendingApprovalOrigin::FreshTurn
+            | super::state::PendingApprovalOrigin::RestoredSession => spawn_approval_request(
                 self.state.settings.clone(),
                 Arc::clone(&base_history),
                 action,
+                self.state.active_session_id.clone(),
             ),
+        };
+        self.state.pending_response = Some(PendingChatRequest {
+            receiver,
             base_history,
             user_message: None,
         });
+        true
+    }
+
+    fn poll_task_notifications(&mut self) -> bool {
+        let Some(session_id) = self.state.active_session_id.as_deref() else {
+            return false;
+        };
+        let Ok(store) = AgentTaskStore::for_project(Some(&self.state.settings.working_dir)) else {
+            return false;
+        };
+        let Ok(notifications) = store.drain_notifications(session_id) else {
+            return false;
+        };
+        if notifications.is_empty() {
+            return false;
+        }
+
+        for notification in notifications {
+            let content = match notification.status {
+                crate::agents_runtime::AgentTaskStatus::Completed => format!(
+                    "Task completed: #{} {}{}",
+                    notification.id,
+                    notification.subject,
+                    notification
+                        .result_summary
+                        .as_deref()
+                        .map(|summary| format!("\n{}", summary))
+                        .unwrap_or_default()
+                ),
+                crate::agents_runtime::AgentTaskStatus::Failed => format!(
+                    "Task failed: #{} {}{}",
+                    notification.id,
+                    notification.subject,
+                    notification
+                        .error
+                        .as_deref()
+                        .map(|error| format!("\n{}", error))
+                        .unwrap_or_default()
+                ),
+                _ => continue,
+            };
+            self.push_system_message(content);
+        }
+        self.state.mark_chat_render_dirty();
+        true
+    }
+
+    fn refresh_active_task_progress(&mut self) -> bool {
+        let Some(session_id) = self.state.active_session_id.as_deref() else {
+            if self.state.active_tasks.is_empty() {
+                return false;
+            }
+            self.state.set_active_tasks(Vec::new());
+            return true;
+        };
+        let Ok(store) = AgentTaskStore::for_project(Some(&self.state.settings.working_dir)) else {
+            return false;
+        };
+        let Ok(tasks) = store.list_for_parent(Some(session_id)) else {
+            return false;
+        };
+
+        if self.state.pending_approval.is_none() && !self.state.thinking {
+            if let Some(task) = tasks.iter().find(|task| {
+                matches!(
+                    task.status,
+                    crate::agents_runtime::AgentTaskStatus::AwaitingApproval
+                ) && task.pending_approval.is_some()
+            }) {
+                if let (Some(pending), Some(child_session_id)) = (
+                    task.pending_approval.as_ref(),
+                    task.child_session_id.as_ref(),
+                ) {
+                    self.state.set_pending_approval_with_origin(
+                        Some(crate::runtime::PendingApproval {
+                            tool_call: pending.tool_call.clone(),
+                            reason: pending.reason.clone(),
+                        }),
+                        super::state::PendingApprovalOrigin::ChildTask {
+                            task_id: task.id.clone(),
+                            child_session_id: child_session_id.clone(),
+                            subject: task.subject.clone(),
+                        },
+                    );
+                    self.state.status = format!(
+                        "Child task #{} requires approval for {}.",
+                        task.id, pending.tool_call.name
+                    );
+                }
+            }
+        }
+
+        let active_tasks = tasks
+            .into_iter()
+            .filter(|task| {
+                matches!(
+                    task.status,
+                    crate::agents_runtime::AgentTaskStatus::Pending
+                        | crate::agents_runtime::AgentTaskStatus::Running
+                        | crate::agents_runtime::AgentTaskStatus::AwaitingApproval
+                )
+            })
+            .map(|task| TaskProgressItem {
+                id: task.id,
+                subject: task.subject,
+                agent_type: task.agent_type,
+                status: task.status,
+            })
+            .collect::<Vec<_>>();
+
+        let unchanged = self.state.active_tasks.len() == active_tasks.len()
+            && self
+                .state
+                .active_tasks
+                .iter()
+                .zip(active_tasks.iter())
+                .all(|(left, right)| {
+                    left.id == right.id
+                        && left.subject == right.subject
+                        && left.agent_type == right.agent_type
+                        && left.status == right.status
+                });
+        if unchanged {
+            return false;
+        }
+
+        self.state.set_active_tasks(active_tasks);
         true
     }
 }
@@ -1252,38 +1557,23 @@ fn draw_onboarding_view(
     theme: TerminalTheme,
     state: &TerminalState,
 ) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(9),
-            Constraint::Min(10),
-            Constraint::Length(1),
-        ])
-        .split(frame.size());
+    let layout = split_onboarding_screen(frame.size());
 
     frame.render_widget(
-        Paragraph::new(theme.welcome_lines(chunks[0].width, &state.working_dir))
+        Paragraph::new(theme.welcome_lines(layout.hero.width, &state.working_dir))
             .alignment(Alignment::Left)
             .wrap(ratatui::widgets::Wrap { trim: false }),
-        chunks[0],
+        layout.hero,
     );
-    render_onboarding(frame, chunks[1], theme, state);
-    render_status_line(frame, chunks[2], theme, state);
+    render_onboarding(frame, layout.body, theme, state);
+    render_status_line(frame, layout.status, theme, state);
 }
 
 fn draw_chat_view(frame: &mut ratatui::Frame<'_>, theme: TerminalTheme, state: &mut TerminalState) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(8),
-            Constraint::Length(5),
-            Constraint::Length(1),
-        ])
-        .split(frame.size());
-
-    render_chat(frame, chunks[0], theme, state);
-    render_prompt(frame, chunks[1], theme, state);
-    render_status_line(frame, chunks[2], theme, state);
+    let layout = split_chat_screen(frame.size());
+    render_chat(frame, layout.transcript, theme, state);
+    render_prompt(frame, layout.prompt, theme, state);
+    render_status_line(frame, layout.status, theme, state);
 }
 
 fn render_onboarding(
@@ -1372,65 +1662,41 @@ fn render_chat(
 
 fn ensure_chat_cache(state: &mut TerminalState, theme: TerminalTheme, width: u16) {
     if state.chat_render_dirty || state.chat_render_width != width {
+        if state.messages.is_empty()
+            && state.pending_approval.is_none()
+            && state.resume_picker.is_none()
+            && state.permissions_view.is_none()
+            && !state.has_selection()
+        {
+            let lines = theme.empty_chat_lines(width, &state.working_dir);
+            state.chat_plain_lines = lines.iter().map(line_to_plain_text).collect();
+            let paragraph = Paragraph::new(lines)
+                .alignment(Alignment::Left)
+                .wrap(ratatui::widgets::Wrap { trim: false });
+            state.chat_render_line_count = paragraph.line_count(width) as u16;
+            state.chat_render_cache = paragraph;
+            state.chat_render_width = width;
+            state.chat_render_dirty = false;
+            return;
+        }
+
         let rendered_lines = render_chat_lines(state, theme, width);
         state.chat_plain_lines = rendered_lines
             .iter()
-            .map(|line| line.text.clone())
+            .map(|line| line.plain_text.clone())
             .collect();
         let lines = rendered_lines
             .iter()
             .enumerate()
             .map(|(index, line)| line.to_line(selection_range_for_line(state, index), theme))
             .collect::<Vec<_>>();
-        let paragraph = Paragraph::new(lines).alignment(Alignment::Left);
+        let paragraph = Paragraph::new(lines)
+            .alignment(Alignment::Left)
+            .wrap(ratatui::widgets::Wrap { trim: false });
         state.chat_render_line_count = rendered_lines.len() as u16;
         state.chat_render_cache = paragraph;
         state.chat_render_width = width;
         state.chat_render_dirty = false;
-    }
-}
-
-#[derive(Clone)]
-struct ChatRenderLine {
-    text: String,
-    style: Style,
-}
-
-impl ChatRenderLine {
-    fn to_line(&self, selection: Option<(usize, usize)>, theme: TerminalTheme) -> Line<'static> {
-        if let Some((start, end)) = selection {
-            let chars = self.text.chars().collect::<Vec<_>>();
-            if chars.is_empty() || start >= chars.len() {
-                return Line::from(Span::styled(self.text.clone(), self.style));
-            }
-
-            let end = end.min(chars.len().saturating_sub(1));
-            let before = chars[..start].iter().collect::<String>();
-            let selected = chars[start..=end].iter().collect::<String>();
-            let after = if end + 1 < chars.len() {
-                chars[end + 1..].iter().collect::<String>()
-            } else {
-                String::new()
-            };
-
-            let mut spans = Vec::new();
-            if !before.is_empty() {
-                spans.push(Span::styled(before, self.style));
-            }
-            spans.push(Span::styled(
-                selected,
-                self.style
-                    .bg(theme.shimmer)
-                    .fg(ratatui::style::Color::Black)
-                    .add_modifier(Modifier::BOLD),
-            ));
-            if !after.is_empty() {
-                spans.push(Span::styled(after, self.style));
-            }
-            Line::from(spans)
-        } else {
-            Line::from(Span::styled(self.text.clone(), self.style))
-        }
     }
 }
 
@@ -1444,77 +1710,72 @@ fn render_chat_lines(
             .empty_chat_lines(width, &state.working_dir)
             .into_iter()
             .map(|line| ChatRenderLine {
-                text: line_to_plain_text(&line),
-                style: Style::default().fg(theme.text),
+                plain_text: line_to_plain_text(&line),
+                spans: line
+                    .spans
+                    .iter()
+                    .map(|span| (span.content.to_string(), span.style))
+                    .collect(),
             })
             .collect();
     }
 
     let mut lines = Vec::new();
+    let compact_boundary = state.messages.iter().rposition(|message| {
+        matches!(message.role, DisplayRole::System) && is_compact_summary_content(&message.content)
+    });
+    let boundary_start = compact_boundary.unwrap_or(0);
+    let mode_cap = match state.transcript_mode {
+        TranscriptViewMode::Main => MAX_VISIBLE_TRANSCRIPT_MESSAGES,
+        TranscriptViewMode::Transcript => MAX_TRANSCRIPT_MODE_MESSAGES,
+    };
+    let boundary_hidden = match state.transcript_mode {
+        TranscriptViewMode::Main => compact_boundary.unwrap_or(0),
+        TranscriptViewMode::Transcript => 0,
+    };
+    let visible_start_base = match state.transcript_mode {
+        TranscriptViewMode::Main => boundary_start,
+        TranscriptViewMode::Transcript => 0,
+    };
+    let tail_hidden = state
+        .messages
+        .len()
+        .saturating_sub(visible_start_base)
+        .saturating_sub(mode_cap);
+    let visible_start = visible_start_base + tail_hidden;
+    let hidden_count = boundary_hidden + tail_hidden;
 
-    for message in &state.messages {
-        match message.role {
-            DisplayRole::User => {
-                for content_line in message.content.lines() {
-                    push_wrapped_line(
-                        &mut lines,
-                        format!(" {}", content_line),
-                        Style::default().fg(theme.text).bg(theme.user_msg_bg),
-                        width,
-                    );
-                }
-                if message.content.is_empty() {
-                    push_wrapped_line(
-                        &mut lines,
-                        " ".to_string(),
-                        Style::default().bg(theme.user_msg_bg),
-                        width,
-                    );
-                }
-            }
-            DisplayRole::Assistant => {
-                for content_line in message.content.lines() {
-                    push_wrapped_line(
-                        &mut lines,
-                        format!("{} {}", GUTTER, content_line),
-                        Style::default().fg(theme.text),
-                        width,
-                    );
-                }
-                if message.content.is_empty() {
-                    push_wrapped_line(
-                        &mut lines,
-                        format!("{} ", GUTTER),
-                        Style::default().fg(theme.subtle),
-                        width,
-                    );
-                }
-            }
-            DisplayRole::System => {
-                for content_line in message.content.lines() {
-                    push_wrapped_line(
-                        &mut lines,
-                        format!("{} {}", BLACK_CIRCLE, content_line),
-                        Style::default().fg(theme.error),
-                        width,
-                    );
-                }
-            }
-            DisplayRole::Tool => {
-                for content_line in message.content.lines() {
-                    push_wrapped_line(
-                        &mut lines,
-                        format!("{} {}", GUTTER, content_line),
-                        Style::default().fg(theme.muted),
-                        width,
-                    );
-                }
-            }
-        }
-        lines.push(ChatRenderLine {
-            text: String::new(),
-            style: Style::default(),
-        });
+    if hidden_count > 0 {
+        push_wrapped_line(
+            &mut lines,
+            format!(
+                "{} {} earlier messages hidden. Ctrl+O toggles transcript view.",
+                BLACK_CIRCLE, hidden_count
+            ),
+            Style::default().fg(theme.muted),
+            width,
+        );
+    }
+
+    let visible_messages = &state.messages[visible_start..];
+    let last_thinking_index = visible_messages
+        .iter()
+        .rposition(|message| matches!(message.role, DisplayRole::Thinking));
+    let render_blocks = build_ui_render_blocks(visible_messages);
+
+    for block in render_blocks {
+        render_render_block(
+            &mut lines,
+            visible_messages,
+            last_thinking_index,
+            state.transcript_mode,
+            state.verbose_transcript,
+            theme,
+            width,
+            block,
+            THINKING_PREVIEW_CHARS,
+        );
+        lines.push(ChatRenderLine::empty());
     }
 
     if let Some(approval) = &state.pending_approval {
@@ -1526,16 +1787,26 @@ fn render_chat_lines(
                 .add_modifier(Modifier::BOLD),
             width,
         );
-        if matches!(
-            approval.origin,
-            super::state::PendingApprovalOrigin::RestoredSession
-        ) {
-            push_wrapped_line(
-                &mut lines,
-                "Restored from previous session.".to_string(),
-                theme.muted_style(),
-                width,
-            );
+        match &approval.origin {
+            super::state::PendingApprovalOrigin::RestoredSession => {
+                push_wrapped_line(
+                    &mut lines,
+                    "Restored from previous session.".to_string(),
+                    theme.muted_style(),
+                    width,
+                );
+            }
+            super::state::PendingApprovalOrigin::ChildTask {
+                task_id, subject, ..
+            } => {
+                push_wrapped_line(
+                    &mut lines,
+                    format!("Child task #{task_id}: {subject}"),
+                    theme.muted_style(),
+                    width,
+                );
+            }
+            super::state::PendingApprovalOrigin::FreshTurn => {}
         }
         push_wrapped_line(
             &mut lines,
@@ -1566,10 +1837,7 @@ fn render_chat_lines(
             Style::default().fg(theme.text),
             width,
         );
-        lines.push(ChatRenderLine {
-            text: String::new(),
-            style: Style::default(),
-        });
+        lines.push(ChatRenderLine::empty());
     }
 
     if let Some(picker) = &state.resume_picker {
@@ -1603,10 +1871,7 @@ fn render_chat_lines(
                 width,
             );
         }
-        lines.push(ChatRenderLine {
-            text: String::new(),
-            style: Style::default(),
-        });
+        lines.push(ChatRenderLine::empty());
     }
 
     if let Some(view) = &state.permissions_view {
@@ -1614,37 +1879,17 @@ fn render_chat_lines(
             render_permissions_view_lines(view, theme)
                 .into_iter()
                 .map(|line| ChatRenderLine {
-                    text: line_to_plain_text(&line),
-                    style: Style::default().fg(theme.text),
+                    plain_text: line_to_plain_text(&line),
+                    spans: line
+                        .spans
+                        .iter()
+                        .map(|span| (span.content.to_string(), span.style))
+                        .collect(),
                 }),
         );
     }
 
     lines
-}
-
-fn push_wrapped_line(lines: &mut Vec<ChatRenderLine>, text: String, style: Style, width: u16) {
-    for wrapped in wrap_plain_line(&text, width.max(1) as usize) {
-        lines.push(ChatRenderLine {
-            text: wrapped,
-            style,
-        });
-    }
-}
-
-fn wrap_plain_line(text: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return Vec::new();
-    }
-    let chars = text.chars().collect::<Vec<_>>();
-    if chars.is_empty() {
-        return vec![String::new()];
-    }
-
-    chars
-        .chunks(width)
-        .map(|chunk| chunk.iter().collect::<String>())
-        .collect()
 }
 
 fn line_to_plain_text(line: &Line<'_>) -> String {
@@ -1944,11 +2189,25 @@ fn render_prompt(
                 theme.muted_style(),
             )),
         ]
+    } else if state.transcript_mode == TranscriptViewMode::Transcript && state.input.is_empty() {
+        vec![
+            Line::from(Span::styled(
+                "Transcript mode. Up/Down, j/k, PgUp/PgDn scroll. Esc returns.",
+                theme.muted_style(),
+            )),
+            Line::from(Span::styled(
+                "v or Ctrl+V toggles verbose transcript details.",
+                theme.muted_style(),
+            )),
+        ]
     } else if state.input.is_empty() {
-        vec![Line::from(Span::styled(
-            "What do you want to do?",
-            theme.muted_style(),
-        ))]
+        vec![
+            Line::from(Span::styled("What do you want to do?", theme.muted_style())),
+            Line::from(Span::styled(
+                "Ctrl+O toggles transcript view. Ctrl+V toggles verbose transcript.",
+                theme.muted_style(),
+            )),
+        ]
     } else {
         state
             .input
@@ -1961,6 +2220,35 @@ fn render_prompt(
             })
             .collect::<Vec<_>>()
     };
+
+    if !state.active_tasks.is_empty() && state.pending_approval.is_none() {
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            format_task_progress_summary(&state.active_tasks),
+            theme.muted_style(),
+        )));
+        for task in state.active_tasks.iter().take(2) {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "#{} [{}] {} ({})",
+                    task.id,
+                    task.agent_type,
+                    task.subject,
+                    format_task_progress_status(task.status)
+                ),
+                theme.muted_style(),
+            )));
+        }
+        if state.active_tasks.len() > 2 {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "… and {} more running task(s)",
+                    state.active_tasks.len() - 2
+                ),
+                theme.muted_style(),
+            )));
+        }
+    }
 
     if state.thinking {
         lines.push(Line::default());
@@ -2024,6 +2312,29 @@ fn render_status_line(
         Span::styled(provider_info, theme.muted_style()),
     ];
 
+    spans.push(Span::styled("  ∙  ", theme.muted_style()));
+    spans.push(Span::styled(
+        match state.transcript_mode {
+            TranscriptViewMode::Main => "main",
+            TranscriptViewMode::Transcript => {
+                if state.verbose_transcript {
+                    "transcript+verbose"
+                } else {
+                    "transcript"
+                }
+            }
+        },
+        theme.muted_style(),
+    ));
+
+    if !state.active_tasks.is_empty() {
+        spans.push(Span::styled("  ∙  ", theme.muted_style()));
+        spans.push(Span::styled(
+            format_task_progress_summary(&state.active_tasks),
+            theme.muted_style(),
+        ));
+    }
+
     if !state.thinking && !state.status.is_empty() {
         spans.push(Span::styled("  ∙  ", theme.muted_style()));
         spans.push(Span::styled(state.status.clone(), theme.muted_style()));
@@ -2033,6 +2344,46 @@ fn render_status_line(
         Paragraph::new(Line::from(spans)).alignment(Alignment::Left),
         area,
     );
+}
+
+fn format_task_progress_summary(tasks: &[TaskProgressItem]) -> String {
+    let running = tasks
+        .iter()
+        .filter(|task| matches!(task.status, crate::agents_runtime::AgentTaskStatus::Running))
+        .count();
+    let awaiting_approval = tasks
+        .iter()
+        .filter(|task| {
+            matches!(
+                task.status,
+                crate::agents_runtime::AgentTaskStatus::AwaitingApproval
+            )
+        })
+        .count();
+    let pending = tasks
+        .len()
+        .saturating_sub(running)
+        .saturating_sub(awaiting_approval);
+    match (running, pending, awaiting_approval) {
+        (r, 0, 0) => format!("{r} subagent(s) running"),
+        (0, p, 0) => format!("{p} subagent(s) queued"),
+        (0, 0, a) => format!("{a} awaiting approval"),
+        (r, p, 0) => format!("{r} running, {p} queued"),
+        (r, 0, a) => format!("{r} running, {a} awaiting approval"),
+        (0, p, a) => format!("{p} queued, {a} awaiting approval"),
+        (r, p, a) => format!("{r} running, {p} queued, {a} awaiting approval"),
+    }
+}
+
+fn format_task_progress_status(status: crate::agents_runtime::AgentTaskStatus) -> &'static str {
+    match status {
+        crate::agents_runtime::AgentTaskStatus::Pending => "queued",
+        crate::agents_runtime::AgentTaskStatus::Running => "running",
+        crate::agents_runtime::AgentTaskStatus::AwaitingApproval => "awaiting approval",
+        crate::agents_runtime::AgentTaskStatus::Completed => "completed",
+        crate::agents_runtime::AgentTaskStatus::Failed => "failed",
+        crate::agents_runtime::AgentTaskStatus::Cancelled => "cancelled",
+    }
 }
 
 fn render_resume_session_line(
@@ -2455,7 +2806,8 @@ fn spawn_chat_request(
     settings: Settings,
     base_history: Arc<Vec<RuntimeMessage>>,
     user_message: RuntimeMessage,
-) -> mpsc::Receiver<ChatWorkerResult> {
+    session_id: Option<String>,
+) -> mpsc::Receiver<ChatWorkerUpdate> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
         let original_user_message = user_message.clone();
@@ -2466,11 +2818,24 @@ fn spawn_chat_request(
             let fallback_user_message = user_message.clone();
             let result = runtime.block_on(async {
                 let engine = QueryEngine::new(settings);
-                engine.submit_message(&base_history, user_message).await
+                let sender = sender.clone();
+                let mut progress = move |event| {
+                    let _ = sender.send(ChatWorkerUpdate::Progress(event));
+                };
+                engine
+                    .submit_message_with_context_and_progress(
+                        &base_history,
+                        user_message,
+                        session_id.clone(),
+                        &mut progress,
+                    )
+                    .await
             });
 
             match result {
-                Ok(turn) => Ok(ChatWorkerResult { turn: Ok(turn) }),
+                Ok(turn) => Ok(ChatWorkerResult {
+                    outcome: Ok(ChatWorkerOutcome::Turn(turn)),
+                }),
                 Err(error) => {
                     let _ = fallback_user_message;
                     Err(error)
@@ -2479,9 +2844,11 @@ fn spawn_chat_request(
         })()
         .unwrap_or_else(|error| {
             let _ = original_user_message;
-            ChatWorkerResult { turn: Err(error) }
+            ChatWorkerResult {
+                outcome: Err(error),
+            }
         });
-        let _ = sender.send(payload);
+        let _ = sender.send(ChatWorkerUpdate::Finished(payload));
     });
     receiver
 }
@@ -2490,7 +2857,8 @@ fn spawn_approval_request(
     settings: Settings,
     base_history: Arc<Vec<RuntimeMessage>>,
     action: ApprovalAction,
-) -> mpsc::Receiver<ChatWorkerResult> {
+    session_id: Option<String>,
+) -> mpsc::Receiver<ChatWorkerUpdate> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
         let payload = (|| -> anyhow::Result<ChatWorkerResult> {
@@ -2499,16 +2867,60 @@ fn spawn_approval_request(
                 .build()?;
             let result = runtime.block_on(async {
                 let engine = QueryEngine::new(settings);
-                engine.resume_after_approval(&base_history, action).await
+                let sender = sender.clone();
+                let mut progress = move |event| {
+                    let _ = sender.send(ChatWorkerUpdate::Progress(event));
+                };
+                engine
+                    .resume_after_approval_with_context_and_progress(
+                        &base_history,
+                        action,
+                        session_id.clone(),
+                        &mut progress,
+                    )
+                    .await
             });
 
             match result {
-                Ok(turn) => Ok(ChatWorkerResult { turn: Ok(turn) }),
+                Ok(turn) => Ok(ChatWorkerResult {
+                    outcome: Ok(ChatWorkerOutcome::Turn(turn)),
+                }),
                 Err(error) => Err(error),
             }
         })()
-        .unwrap_or_else(|error| ChatWorkerResult { turn: Err(error) });
-        let _ = sender.send(payload);
+        .unwrap_or_else(|error| ChatWorkerResult {
+            outcome: Err(error),
+        });
+        let _ = sender.send(ChatWorkerUpdate::Finished(payload));
+    });
+    receiver
+}
+
+fn spawn_task_approval_request(
+    settings: Settings,
+    task_id: String,
+    action: ApprovalAction,
+) -> mpsc::Receiver<ChatWorkerUpdate> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let task_id_for_worker = task_id.clone();
+        let payload = (|| -> anyhow::Result<ChatWorkerResult> {
+            resume_agent_task_after_approval(
+                settings.clone(),
+                Some(settings.working_dir.clone()),
+                task_id.clone(),
+                action,
+            )?;
+            Ok(ChatWorkerResult {
+                outcome: Ok(ChatWorkerOutcome::TaskResume {
+                    message: format!("Child task resumed after approval: #{}", task_id_for_worker),
+                }),
+            })
+        })()
+        .unwrap_or_else(|error| ChatWorkerResult {
+            outcome: Err(error),
+        });
+        let _ = sender.send(ChatWorkerUpdate::Finished(payload));
     });
     receiver
 }
@@ -2537,7 +2949,7 @@ mod tests {
     #[test]
     fn wrap_plain_line_splits_at_width() {
         assert_eq!(
-            wrap_plain_line("abcdef", 2),
+            crate::terminal::markdown::wrap_plain_line("abcdef", 2),
             vec!["ab".to_string(), "cd".to_string(), "ef".to_string()]
         );
     }
@@ -2607,5 +3019,33 @@ mod tests {
         };
 
         assert_eq!(next_click_count(Some(previous), point, Instant::now()), 1);
+    }
+
+    #[test]
+    fn task_progress_summary_prefers_running_count() {
+        let tasks = vec![
+            TaskProgressItem {
+                id: "1".to_string(),
+                subject: "inspect".to_string(),
+                agent_type: "explore".to_string(),
+                status: crate::agents_runtime::AgentTaskStatus::Running,
+            },
+            TaskProgressItem {
+                id: "2".to_string(),
+                subject: "verify".to_string(),
+                agent_type: "verification".to_string(),
+                status: crate::agents_runtime::AgentTaskStatus::Pending,
+            },
+        ];
+
+        assert_eq!(format_task_progress_summary(&tasks), "1 running, 1 queued");
+    }
+
+    #[test]
+    fn task_progress_status_formats_pending_as_queued() {
+        assert_eq!(
+            format_task_progress_status(crate::agents_runtime::AgentTaskStatus::Pending),
+            "queued"
+        );
     }
 }

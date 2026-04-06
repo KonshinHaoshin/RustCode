@@ -1,4 +1,4 @@
-use crate::runtime::types::{RuntimeMessage, RuntimeToolCall};
+use crate::runtime::types::{RuntimeMessage, RuntimeToolCall, RuntimeToolResult};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeUsage {
@@ -11,6 +11,35 @@ pub struct RuntimeUsage {
 pub struct PendingApproval {
     pub tool_call: RuntimeToolCall,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueryProgressEvent {
+    ModelRequest { target: String },
+    ThinkingText(String),
+    AssistantText(String),
+    ToolCall(RuntimeToolCall),
+    ToolResult(RuntimeToolResult),
+    AwaitingApproval(PendingApproval),
+}
+
+pub trait ProgressSink: Send {
+    fn emit(&mut self, event: QueryProgressEvent);
+}
+
+impl<F> ProgressSink for F
+where
+    F: FnMut(QueryProgressEvent) + Send,
+{
+    fn emit(&mut self, event: QueryProgressEvent) {
+        self(event);
+    }
+}
+
+pub struct NoopProgressSink;
+
+impl ProgressSink for NoopProgressSink {
+    fn emit(&mut self, _event: QueryProgressEvent) {}
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

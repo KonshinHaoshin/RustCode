@@ -58,7 +58,7 @@ Status: completed
 - transcript-first layout
 - tool progress / permission dialog / copy mode
 
-Status: pending
+Status: in progress
 
 ### Phase 6
 
@@ -66,7 +66,7 @@ Status: pending
 - 子 agent runtime
 - 更细粒度的 agent-specific context
 
-Status: pending
+Status: in progress
 
 ## Done Criteria
 
@@ -104,3 +104,13 @@ Status: pending
 - Verification completed: `cargo fmt`, `cargo check`
 - Verification blocked: targeted `cargo test -q ...` invocations for new unit tests still fail in this Windows environment with `os error 5` when invoking `rustc` for test compilation
 - Verification note: full `cargo test -q` reaches execution here, but the suite still contains an unrelated failing i18n assertion in `i18n::translator::tests::test_translate`
+- Phase 5 in progress: TUI now restores chat-wheel scrolling after copy-mode changes, surfaces runtime tool progress rows while a turn is executing, and streams OpenAI-style assistant text into the transcript incrementally instead of waiting for the full turn to finish
+- Phase 5 in progress: provider streaming now handles Anthropic SSE text/thinking/tool-use events and OpenAI-style streamed tool_call deltas, allowing token-level transcript updates even on tool-enabled turns when the upstream provider supports streaming
+- Phase 5 in progress: assistant transcript rendering now uses a Claude-style markdown pipeline in the TUI, including headings, lists, blockquotes, code blocks, and responsive table fallback
+- Phase 5 in progress: transcript chat lines now preserve styled spans for rendering while keeping plain-text copies for selection/copy behavior
+- Phase 6 in progress: task-oriented subagent runtime landed with `task_create` / `task_list` / `task_get` / `task_update`, file-backed task persistence, isolated child sessions, and TUI task completion notifications
+- Phase 6 in progress: agent definitions now carry per-agent context/memory/permission profiles, child agents load optional memory plus parent context summaries, and direct `run_agent` uses the same runtime contract as background subagents
+- Phase 6 in progress: TUI now polls and displays queued/running child-agent progress for the active parent session instead of only surfacing completion/failure notifications after the fact
+- Phase 6 in progress: child-agent permission requests now bubble back into the parent TUI, task-bound approvals resume the isolated child session instead of failing, and background subagents can pause on approval without losing state
+- Phase 6 in progress: agent tool execution profiles now extend beyond the builtin allowlist model, with per-agent toggles for task tools, builtin allowlists, MCP tools, and external MCP tools
+- Phase 6 in progress: subagent execution now honors `max_turns` through a bounded continuation loop, allowing limited multi-turn completion when a turn ends empty after tool use or is truncated by the model

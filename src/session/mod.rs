@@ -90,6 +90,37 @@ impl SessionManager {
             created_at: now,
             updated_at: now,
             project_root: self.project_root.clone(),
+            parent_session_id: None,
+            spawned_by_task_id: None,
+            session_kind: SessionKind::Primary,
+            status: SessionStatus::Active,
+            pending_approval: None,
+            messages: Vec::new(),
+        };
+        self.save(&session)?;
+        Ok(session)
+    }
+
+    pub fn create_child_session(
+        &self,
+        parent_session_id: Option<&str>,
+        task_id: &str,
+        name: Option<&str>,
+    ) -> anyhow::Result<Session> {
+        std::fs::create_dir_all(&self.sessions_dir)?;
+
+        let id = uuid::Uuid::new_v4().to_string();
+        let session_name = name.unwrap_or("child-agent-session").to_string();
+        let now = Utc::now();
+        let session = Session {
+            id,
+            name: session_name,
+            created_at: now,
+            updated_at: now,
+            project_root: self.project_root.clone(),
+            parent_session_id: parent_session_id.map(str::to_string),
+            spawned_by_task_id: Some(task_id.to_string()),
+            session_kind: SessionKind::ChildAgent,
             status: SessionStatus::Active,
             pending_approval: None,
             messages: Vec::new(),
@@ -199,6 +230,9 @@ pub struct Session {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub project_root: Option<PathBuf>,
+    pub parent_session_id: Option<String>,
+    pub spawned_by_task_id: Option<String>,
+    pub session_kind: SessionKind,
     pub status: SessionStatus,
     pub pending_approval: Option<StoredPendingApproval>,
     pub messages: Vec<Message>,
@@ -213,10 +247,26 @@ impl Default for Session {
             created_at: now,
             updated_at: now,
             project_root: None,
+            parent_session_id: None,
+            spawned_by_task_id: None,
+            session_kind: SessionKind::Primary,
             status: SessionStatus::Completed,
             pending_approval: None,
             messages: Vec::new(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionKind {
+    Primary,
+    ChildAgent,
+}
+
+impl Default for SessionKind {
+    fn default() -> Self {
+        Self::Primary
     }
 }
 

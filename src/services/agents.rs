@@ -14,6 +14,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use crate::agents_runtime::{
+    run_agent_direct, AgentContextStrategy, AgentMemoryScope, AgentPermissionMode,
+};
 use crate::state::AppState;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -39,6 +42,19 @@ impl std::fmt::Display for AgentType {
     }
 }
 
+impl AgentType {
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.to_ascii_lowercase().as_str() {
+            "guide" | "claude-code-guide" | "rustcode-guide" => Some(Self::ClaudeCodeGuide),
+            "explore" => Some(Self::Explore),
+            "general" | "general-purpose" => Some(Self::GeneralPurpose),
+            "plan" => Some(Self::Plan),
+            "verify" | "verification" => Some(Self::Verification),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentDefinition {
     pub agent_type: AgentType,
@@ -50,6 +66,17 @@ pub struct AgentDefinition {
     pub system_prompt: String,
     pub source: String,
     pub base_dir: String,
+    pub permission_mode: Option<AgentPermissionMode>,
+    pub memory_scope: Option<AgentMemoryScope>,
+    pub max_turns: Option<usize>,
+    pub context_strategy: Option<AgentContextStrategy>,
+    pub prompt_preamble: Option<String>,
+    #[serde(default)]
+    pub allow_task_tools: bool,
+    #[serde(default)]
+    pub allow_mcp_tools: bool,
+    #[serde(default)]
+    pub allow_external_mcp_tools: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,7 +120,7 @@ pub struct AgentsService {
 
 impl AgentsService {
     pub fn new(state: Arc<RwLock<AppState>>) -> Self {
-        let agents = Self::load_builtin_agents();
+        let agents = Self::builtin_agents();
         Self {
             state,
             agents: Arc::new(RwLock::new(agents)),
@@ -101,7 +128,7 @@ impl AgentsService {
         }
     }
 
-    fn load_builtin_agents() -> HashMap<AgentType, AgentDefinition> {
+    pub fn builtin_agents() -> HashMap<AgentType, AgentDefinition> {
         let mut agents = HashMap::new();
 
         agents.insert(
@@ -124,6 +151,17 @@ Key responsibilities:
 Be concise, helpful, and focus on practical guidance."#.to_string(),
                 source: "built-in".to_string(),
                 base_dir: "built-in".to_string(),
+                permission_mode: Some(AgentPermissionMode::BackgroundSafe),
+                memory_scope: Some(AgentMemoryScope::User),
+                max_turns: Some(1),
+                context_strategy: Some(AgentContextStrategy::TaskPlusCompactSummary),
+                prompt_preamble: Some(
+                    "Prefer explanation and navigation over editing. Cite concrete files or commands when useful."
+                        .to_string(),
+                ),
+                allow_task_tools: false,
+                allow_mcp_tools: false,
+                allow_external_mcp_tools: false,
             },
         );
 
@@ -147,6 +185,17 @@ Key responsibilities:
 Be thorough but efficient. Focus on providing useful insights about the codebase."#.to_string(),
                 source: "built-in".to_string(),
                 base_dir: "built-in".to_string(),
+                permission_mode: Some(AgentPermissionMode::BackgroundSafe),
+                memory_scope: Some(AgentMemoryScope::Project),
+                max_turns: Some(1),
+                context_strategy: Some(AgentContextStrategy::TaskPlusCompactSummary),
+                prompt_preamble: Some(
+                    "Read before concluding. Prefer project structure, ownership, and relevant file pointers over speculative advice."
+                        .to_string(),
+                ),
+                allow_task_tools: false,
+                allow_mcp_tools: false,
+                allow_external_mcp_tools: false,
             },
         );
 
@@ -170,6 +219,17 @@ Key responsibilities:
 Be flexible and adaptive to different types of requests."#.to_string(),
                 source: "built-in".to_string(),
                 base_dir: "built-in".to_string(),
+                permission_mode: Some(AgentPermissionMode::Inherit),
+                memory_scope: Some(AgentMemoryScope::Project),
+                max_turns: Some(2),
+                context_strategy: Some(AgentContextStrategy::TaskPlusCompactSummary),
+                prompt_preamble: Some(
+                    "Stay tightly scoped. If a command or edit is blocked, explain the blocker instead of broadening scope."
+                        .to_string(),
+                ),
+                allow_task_tools: false,
+                allow_mcp_tools: false,
+                allow_external_mcp_tools: false,
             },
         );
 
@@ -193,6 +253,17 @@ Key responsibilities:
 Be thorough and structured. Focus on creating clear, executable plans."#.to_string(),
                 source: "built-in".to_string(),
                 base_dir: "built-in".to_string(),
+                permission_mode: Some(AgentPermissionMode::BackgroundSafe),
+                memory_scope: Some(AgentMemoryScope::Project),
+                max_turns: Some(1),
+                context_strategy: Some(AgentContextStrategy::TaskPlusCompactSummary),
+                prompt_preamble: Some(
+                    "Return concrete steps, constraints, risks, and definition of done. Avoid implementation unless explicitly asked."
+                        .to_string(),
+                ),
+                allow_task_tools: false,
+                allow_mcp_tools: false,
+                allow_external_mcp_tools: false,
             },
         );
 
@@ -216,10 +287,26 @@ Key responsibilities:
 Be thorough and systematic. Focus on finding and reporting issues."#.to_string(),
                 source: "built-in".to_string(),
                 base_dir: "built-in".to_string(),
+                permission_mode: Some(AgentPermissionMode::Inherit),
+                memory_scope: Some(AgentMemoryScope::Project),
+                max_turns: Some(2),
+                context_strategy: Some(AgentContextStrategy::TaskPlusRecentAssistantSummary),
+                prompt_preamble: Some(
+                    "Prefer running the smallest relevant verification first and report evidence, not confidence."
+                        .to_string(),
+                ),
+                allow_task_tools: false,
+                allow_mcp_tools: false,
+                allow_external_mcp_tools: false,
             },
         );
 
         agents
+    }
+
+    pub fn builtin_definition_by_name(name: &str) -> Option<AgentDefinition> {
+        let agent_type = AgentType::parse(name)?;
+        Self::builtin_agents().get(&agent_type).cloned()
     }
 
     pub async fn list_agents(&self) -> Vec<AgentDefinition> {
@@ -264,43 +351,55 @@ Be thorough and systematic. Focus on finding and reporting issues."#.to_string()
 
         println!("🤖 Running agent: {} ({})", agent.name, session_id);
 
-        let result = self.execute_agent(&agent, prompt).await?;
+        let (result, failure) = {
+            let state = self.state.read().await;
+            let project_root = match &state.settings.working_dir {
+                path if path.as_os_str().is_empty() => None,
+                path => Some(path.clone()),
+            };
+            match run_agent_direct(
+                state.settings.clone(),
+                project_root,
+                agent.clone(),
+                prompt.to_string(),
+            )
+            .await
+            {
+                Ok(result) => (Some(result), None),
+                Err(error) => (None, Some(error.to_string())),
+            }
+        };
 
         let mut sessions = self.sessions.write().await;
         if let Some(session) = sessions.get_mut(&session_id) {
-            session.status = AgentStatus::Completed;
-            session.result = Some(result.clone());
             session.updated_at = Utc::now();
-            session.messages.push(AgentMessage {
-                role: "assistant".to_string(),
-                content: result,
-                timestamp: Utc::now(),
-            });
 
-            return Ok(session.clone());
+            match (result, failure) {
+                (Some(result), None) => {
+                    session.status = AgentStatus::Completed;
+                    session.result = Some(result.clone());
+                    session.messages.push(AgentMessage {
+                        role: "assistant".to_string(),
+                        content: result,
+                        timestamp: Utc::now(),
+                    });
+                    return Ok(session.clone());
+                }
+                (_, Some(error)) => {
+                    session.status = AgentStatus::Failed;
+                    session.result = Some(error.clone());
+                    session.messages.push(AgentMessage {
+                        role: "assistant".to_string(),
+                        content: error.clone(),
+                        timestamp: Utc::now(),
+                    });
+                    return Err(anyhow::anyhow!(error));
+                }
+                _ => {}
+            }
         }
 
         Err(anyhow::anyhow!("Session not found after execution"))
-    }
-
-    async fn execute_agent(&self, agent: &AgentDefinition, prompt: &str) -> anyhow::Result<String> {
-        let state = self.state.read().await;
-        let engine = crate::runtime::QueryEngine::new(state.settings.clone());
-        let history = vec![crate::runtime::RuntimeMessage::system(
-            agent.system_prompt.clone(),
-        )];
-        let response = engine.submit_text_turn(&history, prompt).await?;
-        if response.status == crate::runtime::TurnStatus::AwaitingApproval {
-            return Err(anyhow::anyhow!(
-                "Agent execution requires interactive approval. Re-run in TUI."
-            ));
-        }
-
-        if let Some(content) = response.assistant_text() {
-            return Ok(content.to_string());
-        }
-
-        Ok(String::new())
     }
 
     pub async fn get_session(&self, session_id: &str) -> Option<AgentSession> {

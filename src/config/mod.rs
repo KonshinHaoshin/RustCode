@@ -243,6 +243,10 @@ pub fn project_state_dir(cwd: Option<&Path>) -> Option<PathBuf> {
     project_rustcode_dir(cwd).map(|dir| dir.join("state"))
 }
 
+pub fn project_tasks_dir(cwd: Option<&Path>) -> Option<PathBuf> {
+    project_state_dir(cwd).map(|dir| dir.join("tasks"))
+}
+
 pub fn project_permission_events_path(cwd: Option<&Path>) -> Option<PathBuf> {
     project_state_dir(cwd).map(|dir| dir.join("permission-events.json"))
 }

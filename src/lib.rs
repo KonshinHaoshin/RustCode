@@ -16,6 +16,7 @@
 //! - Multi-language i18n support
 
 pub mod advanced;
+pub mod agents_runtime;
 pub mod api;
 pub mod cli;
 pub mod compact;
@@ -47,6 +48,7 @@ pub mod wasm;
 pub mod web;
 
 pub use advanced::{ProjectInitializer, RemoteExecutor, SshClient};
+pub use agents_runtime::{AgentTask, AgentTaskStatus, AgentTaskStore};
 pub use api::{AnthropicClient, ApiClient, ChatMessage};
 pub use cli::Cli;
 pub use config::Settings;

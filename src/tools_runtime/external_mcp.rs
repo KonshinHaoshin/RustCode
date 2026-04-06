@@ -2,7 +2,7 @@ use crate::{
     config::McpConfig,
     mcp::McpMessage,
     runtime::types::{RuntimeToolCall, RuntimeToolResult},
-    tools_runtime::{ToolDefinition, ToolExecutor},
+    tools_runtime::{ToolDefinition, ToolExecutionContext, ToolExecutor},
 };
 use async_trait::async_trait;
 use tokio::{
@@ -190,7 +190,11 @@ impl ToolExecutor for ExternalMcpToolExecutor {
         definitions
     }
 
-    async fn execute(&self, call: &RuntimeToolCall) -> RuntimeToolResult {
+    async fn execute(
+        &self,
+        call: &RuntimeToolCall,
+        _context: &ToolExecutionContext,
+    ) -> RuntimeToolResult {
         let Some((server_name, tool_name)) = Self::parse_qualified_tool_name(&call.name) else {
             return RuntimeToolResult {
                 tool_call_id: call.id.clone(),
