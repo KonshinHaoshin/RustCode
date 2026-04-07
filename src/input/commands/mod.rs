@@ -5,9 +5,12 @@ pub fn format_help_text() -> String {
         "Available slash commands:",
         "/help           Show available commands",
         "/clear          Clear the active conversation and start a new session",
+        "/branch [id]    Fork the current session, optionally from a user message id",
         "/compact [text] Compact history into a summary and keep recent context",
         "/permissions    Inspect permission rules",
         "/model [name]   Show or change the active model for this session",
+        "/rewind <id>    Rewind conversation and files to a user message id (or last-user)",
+        "/rewind-files <id> Rewind only files to a user message id (or last-user)",
         "/status         Show current runtime status",
         "/resume [id]    Resume the latest or specified session",
     ]

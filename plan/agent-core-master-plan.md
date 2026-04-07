@@ -68,6 +68,22 @@ Status: in progress
 
 Status: in progress
 
+### Phase 7
+
+- session fork / replay / rewind
+- transcript message identity
+- file-history backed rewind
+
+Status: completed
+
+### Phase 8
+
+- Tauri desktop migration
+- React/Vite transcript-first desktop shell
+- runtime/session/event bridge for desktop GUI
+
+Status: in progress
+
 ## Done Criteria
 
 - 主交互入口不再直接调用 `ApiClient.chat`
@@ -114,3 +130,12 @@ Status: in progress
 - Phase 6 in progress: child-agent permission requests now bubble back into the parent TUI, task-bound approvals resume the isolated child session instead of failing, and background subagents can pause on approval without losing state
 - Phase 6 in progress: agent tool execution profiles now extend beyond the builtin allowlist model, with per-agent toggles for task tools, builtin allowlists, MCP tools, and external MCP tools
 - Phase 6 in progress: subagent execution now honors `max_turns` through a bounded continuation loop, allowing limited multi-turn completion when a turn ends empty after tool use or is truncated by the model
+- Phase 7 in progress: session persistence now carries stable message ids and fork metadata, enabling `/branch` plus message-bound rewind semantics instead of only linear `/resume`
+- Phase 7 in progress: builtin `file_write` / `file_edit` now attach file-history metadata into tool results, and the TUI can rewind tracked files or the active conversation to a prior user message
+- Phase 7 in progress: TUI branch/rewind flows now support Claude-style no-arg message pickers, rewind confirmation previews, and unique-prefix message id resolution
+- Phase 7 in progress: `execute_command` now participates in rewind via bounded project snapshots and batch file-history metadata
+- Phase 7 completed: transcript user turns now surface stable short message ids, child/fork session restore keeps lineage visible, and rewind previews distinguish tracked command/file origins including truncation warnings
+- Phase 8 in progress: removed the old `gui-egui` default path from the root crate and introduced a dedicated `src-tauri/` desktop host crate plus `gui/` React/Vite frontend workspace
+- Phase 8 in progress: the desktop bridge now exposes bootstrap/settings/session/submit/approval commands on top of `QueryEngine`, and forwards runtime progress as Tauri events for thinking/text/tool/approval updates
+- Phase 8 in progress: initial desktop UI now supports onboarding gating, settings editing, session restore, transcript rendering, prompt submission, and approval resume flows
+- Phase 8 verification completed: `cargo fmt`, `cargo check`, `cargo check -p rustcode-tauri`, `pnpm install`, `pnpm run build`

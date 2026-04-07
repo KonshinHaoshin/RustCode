@@ -1,6 +1,7 @@
 use crate::{
     agents_runtime::{spawn_agent_task, AgentTaskStatus, AgentTaskStore},
     config::{project_root_from, Settings},
+    file_history::{FileHistoryBatchEntry, FileHistoryOrigin, FileHistoryStore},
     runtime::types::{RuntimeToolCall, RuntimeToolResult},
     services::agents::AgentsService,
     tools::{ToolError, ToolOutput, ToolRegistry},
@@ -9,6 +10,8 @@ use crate::{
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::path::PathBuf;
+
+const EXECUTE_COMMAND_TRACK_LIMIT: usize = 200;
 
 #[derive(Debug, Clone, Default)]
 pub struct ToolExecutionContext {
@@ -253,7 +256,93 @@ impl BuiltinToolExecutor {
             name: call.name.clone(),
             content,
             is_error: false,
+            metadata: std::collections::HashMap::new(),
         })
+    }
+
+    fn capture_file_history_metadata(
+        &self,
+        call: &RuntimeToolCall,
+        context: &ToolExecutionContext,
+    ) -> Option<serde_json::Value> {
+        if !matches!(call.name.as_str(), "file_write" | "file_edit") {
+            return None;
+        }
+        let session_id = context.session_id.as_deref()?;
+        let file_path = call.arguments.get("file_path")?.as_str()?;
+        let store = FileHistoryStore::for_project(self.project_root.as_deref()).ok()?;
+        let mutation = store.capture_mutation(session_id, file_path).ok()?;
+        serde_json::to_value(mutation).ok()
+    }
+
+    fn capture_execute_command_snapshot(
+        &self,
+        call: &RuntimeToolCall,
+        context: &ToolExecutionContext,
+    ) -> Option<(
+        FileHistoryStore,
+        String,
+        crate::file_history::CommandSnapshot,
+    )> {
+        if call.name != "execute_command" {
+            return None;
+        }
+        let session_id = context.session_id.as_deref()?.to_string();
+        let store = FileHistoryStore::for_project(self.project_root.as_deref()).ok()?;
+        let snapshot = store
+            .capture_command_snapshot(&session_id, EXECUTE_COMMAND_TRACK_LIMIT)
+            .ok()?;
+        Some((store, session_id, snapshot))
+    }
+
+    fn apply_execute_command_file_history(
+        &self,
+        metadata: &mut std::collections::HashMap<String, serde_json::Value>,
+        snapshot: Option<(
+            FileHistoryStore,
+            String,
+            crate::file_history::CommandSnapshot,
+        )>,
+    ) {
+        let Some((store, session_id, snapshot)) = snapshot else {
+            return;
+        };
+        let Ok((batch, truncated)) =
+            store.diff_command_snapshot(&snapshot, &session_id, EXECUTE_COMMAND_TRACK_LIMIT)
+        else {
+            return;
+        };
+
+        if !batch.is_empty() {
+            let legacy_batch = batch.clone();
+            let v2_batch = batch
+                .into_iter()
+                .map(|mutation| FileHistoryBatchEntry {
+                    mutation,
+                    origin: FileHistoryOrigin::ExecuteCommandSnapshot,
+                })
+                .collect::<Vec<_>>();
+            if let Ok(value) = serde_json::to_value(legacy_batch) {
+                metadata.insert("file_history_batch".to_string(), value);
+            }
+            if let Ok(value) = serde_json::to_value(v2_batch) {
+                metadata.insert("file_history_batch_v2".to_string(), value);
+            }
+            metadata.insert(
+                "file_history_origin".to_string(),
+                serde_json::Value::String("execute_command_snapshot".to_string()),
+            );
+            metadata.insert(
+                "file_history_tracking_mode".to_string(),
+                serde_json::Value::String("bounded_project_snapshot".to_string()),
+            );
+        }
+        if truncated {
+            metadata.insert(
+                "file_history_truncated".to_string(),
+                serde_json::Value::Bool(true),
+            );
+        }
     }
 }
 
@@ -295,6 +384,7 @@ impl ToolExecutor for BuiltinToolExecutor {
                     name: call.name.clone(),
                     content: error.to_string(),
                     is_error: true,
+                    metadata: std::collections::HashMap::new(),
                 },
             };
         }
@@ -305,25 +395,50 @@ impl ToolExecutor for BuiltinToolExecutor {
                 name: call.name.clone(),
                 content: format!("Tool not allowed for this agent: {}", call.name),
                 is_error: true,
+                metadata: std::collections::HashMap::new(),
             };
         }
 
+        let file_history_metadata = self.capture_file_history_metadata(call, context);
+        let execute_command_snapshot = self.capture_execute_command_snapshot(call, context);
         match self
             .registry
             .execute(&call.name, call.arguments.clone())
             .await
         {
-            Ok(output) => RuntimeToolResult {
-                tool_call_id: call.id.clone(),
-                name: call.name.clone(),
-                content: self.render_success(output),
-                is_error: false,
-            },
+            Ok(mut output) => {
+                if let Some(file_history) = file_history_metadata {
+                    output
+                        .metadata
+                        .insert("file_history".to_string(), file_history);
+                }
+                self.apply_execute_command_file_history(
+                    &mut output.metadata,
+                    execute_command_snapshot,
+                );
+                let metadata = output.metadata.clone();
+                let content = self.render_success(output);
+                RuntimeToolResult {
+                    tool_call_id: call.id.clone(),
+                    name: call.name.clone(),
+                    content,
+                    is_error: false,
+                    metadata,
+                }
+            }
             Err(error) => RuntimeToolResult {
                 tool_call_id: call.id.clone(),
                 name: call.name.clone(),
                 content: self.render_error(error),
                 is_error: true,
+                metadata: {
+                    let mut metadata = std::collections::HashMap::new();
+                    self.apply_execute_command_file_history(
+                        &mut metadata,
+                        execute_command_snapshot,
+                    );
+                    metadata
+                },
             },
         }
     }

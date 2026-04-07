@@ -48,6 +48,7 @@ impl ToolExecutor for CompositeToolExecutor {
             name: call.name.clone(),
             content: format!("Tool not found: {}", call.name),
             is_error: true,
+            metadata: std::collections::HashMap::new(),
         }
     }
 }

@@ -60,6 +60,7 @@ impl SettingsPermissionGate {
             name: call.name.clone(),
             content,
             is_error: true,
+            metadata: std::collections::HashMap::new(),
         }
     }
 

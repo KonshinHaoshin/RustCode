@@ -262,6 +262,7 @@ mod tests {
                 name: call.name.clone(),
                 content: "noop".to_string(),
                 is_error: false,
+                metadata: std::collections::HashMap::new(),
             }
         }
     }
@@ -447,6 +448,7 @@ mod tests {
                 name: call.name.clone(),
                 content: "file_a\nfile_b".to_string(),
                 is_error: false,
+                metadata: std::collections::HashMap::new(),
             }
         }
     }

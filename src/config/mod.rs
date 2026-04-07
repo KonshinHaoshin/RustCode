@@ -247,6 +247,10 @@ pub fn project_tasks_dir(cwd: Option<&Path>) -> Option<PathBuf> {
     project_state_dir(cwd).map(|dir| dir.join("tasks"))
 }
 
+pub fn project_file_history_dir(cwd: Option<&Path>) -> Option<PathBuf> {
+    project_state_dir(cwd).map(|dir| dir.join("file-history"))
+}
+
 pub fn project_permission_events_path(cwd: Option<&Path>) -> Option<PathBuf> {
     project_state_dir(cwd).map(|dir| dir.join("permission-events.json"))
 }

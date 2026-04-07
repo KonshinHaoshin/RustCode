@@ -1,0 +1,280 @@
+:root {
+  color-scheme: dark;
+  font-family: "Segoe UI", "PingFang SC", sans-serif;
+  background: #0d1117;
+  color: #e6edf3;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at top left, rgba(88, 166, 255, 0.16), transparent 30%),
+    radial-gradient(circle at bottom right, rgba(63, 185, 80, 0.12), transparent 28%),
+    #0d1117;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+.screen {
+  min-height: 100vh;
+}
+
+.center {
+  display: grid;
+  place-items: center;
+}
+
+.shell {
+  display: grid;
+  grid-template-columns: 360px 1fr;
+}
+
+.sidebar {
+  border-right: 1px solid rgba(230, 237, 243, 0.08);
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  background: rgba(13, 17, 23, 0.82);
+  backdrop-filter: blur(18px);
+}
+
+.eyebrow {
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 12px;
+  color: #7d8590;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+.muted {
+  color: #7d8590;
+}
+
+.panel {
+  padding: 16px;
+  border-radius: 18px;
+  border: 1px solid rgba(230, 237, 243, 0.08);
+  background: rgba(22, 27, 34, 0.75);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.panelHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.sessionList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 240px;
+  overflow: auto;
+}
+
+.sessionItem {
+  border: 1px solid rgba(230, 237, 243, 0.08);
+  background: transparent;
+  color: inherit;
+  border-radius: 14px;
+  padding: 12px;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sessionItem.active {
+  border-color: rgba(88, 166, 255, 0.65);
+  background: rgba(88, 166, 255, 0.1);
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 14px;
+}
+
+input,
+textarea {
+  border-radius: 12px;
+  border: 1px solid rgba(230, 237, 243, 0.12);
+  background: rgba(13, 17, 23, 0.8);
+  color: inherit;
+  padding: 12px 14px;
+}
+
+textarea {
+  min-height: 108px;
+  resize: vertical;
+}
+
+button {
+  border: 0;
+  border-radius: 999px;
+  padding: 12px 16px;
+  cursor: pointer;
+}
+
+.primaryButton {
+  background: linear-gradient(135deg, #2f81f7, #1f6feb);
+  color: white;
+}
+
+.ghostButton {
+  background: transparent;
+  color: #9fb3c8;
+}
+
+.mainPane {
+  display: grid;
+  grid-template-rows: 1fr auto auto;
+  min-height: 100vh;
+}
+
+.transcript {
+  padding: 28px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.bubble {
+  max-width: min(900px, 100%);
+  padding: 16px 18px;
+  border-radius: 18px;
+  background: rgba(22, 27, 34, 0.84);
+  border: 1px solid rgba(230, 237, 243, 0.08);
+}
+
+.bubble.user {
+  align-self: flex-end;
+  background: rgba(31, 111, 235, 0.16);
+}
+
+.bubble header {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  font-size: 13px;
+  color: #7d8590;
+}
+
+.bubble pre,
+.thinking,
+.approvalCard pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.approvalCard {
+  margin: 0 28px 18px;
+  padding: 16px 18px;
+  border-radius: 20px;
+  border: 1px solid rgba(255, 166, 87, 0.3);
+  background: rgba(62, 33, 5, 0.78);
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.approvalActions {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.composer {
+  padding: 0 28px 28px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 16px;
+}
+
+.activityPanel {
+  min-height: 220px;
+}
+
+.activityItem {
+  border-top: 1px solid rgba(230, 237, 243, 0.08);
+  padding-top: 10px;
+}
+
+.activityItem span {
+  color: #7d8590;
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+}
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.56);
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.overlayCard {
+  width: min(560px, 100%);
+  padding: 28px;
+  border-radius: 24px;
+  background: #161b22;
+  border: 1px solid rgba(230, 237, 243, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.errorBanner {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  max-width: 520px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: #da3633;
+  color: white;
+}
+
+@media (max-width: 1100px) {
+  .shell {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    border-right: 0;
+    border-bottom: 1px solid rgba(230, 237, 243, 0.08);
+  }
+
+  .composer {
+    grid-template-columns: 1fr;
+  }
+
+  .approvalCard {
+    flex-direction: column;
+  }
+}

@@ -18,6 +18,8 @@ Thumbs.db
 *.dll
 *.so
 *.dylib
+gui/node_modules/
+gui/dist/
 
 # Test
 /test-project/

@@ -11,7 +11,7 @@
 //! - Remote execution
 //! - Project initialization
 //! - WebAssembly support for browser environments
-//! - Native GUI with egui/eframe
+//! - Desktop shell via Tauri
 //! - Plugin marketplace web interface
 //! - Multi-language i18n support
 
@@ -21,6 +21,7 @@ pub mod api;
 pub mod cli;
 pub mod compact;
 pub mod config;
+pub mod file_history;
 pub mod input;
 pub mod mcp;
 pub mod memory;
@@ -38,8 +39,6 @@ pub mod utils;
 pub mod voice;
 
 // Feature-gated modules
-#[cfg(feature = "gui-egui")]
-pub mod gui;
 #[cfg(feature = "i18n")]
 pub mod i18n;
 #[cfg(feature = "wasm")]
@@ -63,8 +62,6 @@ pub use tools::ToolRegistry;
 pub use voice::VoiceInput;
 
 // Feature-gated re-exports
-#[cfg(feature = "gui-egui")]
-pub use gui::RustCodeApp;
 #[cfg(feature = "i18n")]
 pub use i18n::Translator;
 #[cfg(feature = "wasm")]

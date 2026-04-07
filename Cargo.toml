@@ -6,6 +6,9 @@ description = "fork自https://github.com/lorryjovens-hub/claude-code-rust开始�
 license = "MIT"
 repository = "https://github.com/KonshinHaoshin/claude-code-rust"
 
+[workspace]
+members = ["src-tauri"]
+
 [dependencies]
 # CLI
 clap = { version = "4.5", features = ["derive", "color", "suggestions"] }
@@ -86,15 +89,6 @@ wasm-bindgen-futures = { version = "0.4", optional = true }
 js-sys = { version = "0.3", optional = true }
 web-sys = { version = "0.3", optional = true }
 
-# GUI (egui)
-eframe = { version = "0.28", optional = true }
-egui = { version = "0.28", optional = true }
-egui_extras = { version = "0.28", optional = true }
-
-# Note: iced is disabled due to web-sys version conflicts with eframe
-# GUI (iced) - alternative (disabled)
-# iced = { version = "0.12", optional = true, features = ["tokio"] }
-
 # Web server for plugin marketplace
 axum = { version = "0.7", optional = true }
 tower = { version = "0.4", optional = true }
@@ -113,22 +107,15 @@ mockall = "0.12"
 wasm-bindgen-test = "0.3"
 
 [features]
-default = ["gui-egui", "i18n"]
+default = ["i18n"]
 wasm = ["wasm-bindgen", "wasm-bindgen-futures", "js-sys", "web-sys"]
-gui-egui = ["eframe", "egui", "egui_extras"]
-# gui-iced = ["iced"]
 web = ["axum", "tower", "tower-http", "askama"]
 i18n = ["fluent", "fluent-bundle", "unic-langid", "rust-embed"]
-full = ["wasm", "gui-egui", "web", "i18n"]
+full = ["wasm", "web", "i18n"]
 
 [[bin]]
 name = "rustcode"
 path = "src/main.rs"
-
-[[bin]]
-name = "rustcode-gui"
-path = "src/gui/main.rs"
-required-features = ["gui-egui"]
 
 [[bin]]
 name = "rustcode-web"

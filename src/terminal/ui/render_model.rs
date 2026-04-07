@@ -198,10 +198,16 @@ mod tests {
             DisplayMessage {
                 role: DisplayRole::Tool,
                 content: "Tool request: custom_tool {}".to_string(),
+                message_id: None,
+                parent_id: None,
+                entry_type: None,
             },
             DisplayMessage {
                 role: DisplayRole::Tool,
                 content: "Tool result: custom_tool\nok".to_string(),
+                message_id: None,
+                parent_id: None,
+                entry_type: None,
             },
         ];
 

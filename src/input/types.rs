@@ -2,11 +2,24 @@
 pub enum LocalCommand {
     Help,
     Clear,
-    Compact { instructions: Option<String> },
+    Branch {
+        message_id: Option<String>,
+    },
+    Compact {
+        instructions: Option<String>,
+    },
     Permissions,
-    Model { model: Option<String> },
+    Model {
+        model: Option<String>,
+    },
+    Rewind {
+        message_id: Option<String>,
+        files_only: bool,
+    },
     Status,
-    Resume { session_id: Option<String> },
+    Resume {
+        session_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

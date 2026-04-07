@@ -27,6 +27,7 @@ pub(crate) fn render_render_block(
                 visible_messages,
                 last_thinking_index,
                 transcript_mode,
+                verbose_transcript,
                 theme,
                 width,
                 &message,
@@ -57,13 +58,21 @@ fn render_single_message(
     visible_messages: &[DisplayMessage],
     last_thinking_index: Option<usize>,
     transcript_mode: TranscriptViewMode,
+    verbose_transcript: bool,
     theme: TerminalTheme,
     width: u16,
     message: &DisplayMessage,
     thinking_preview_chars: usize,
 ) {
     match message.role {
-        DisplayRole::User => render_user_message(lines, theme, width, message),
+        DisplayRole::User => render_user_message(
+            lines,
+            transcript_mode,
+            verbose_transcript,
+            theme,
+            width,
+            message,
+        ),
         DisplayRole::Assistant => render_assistant_message(lines, theme, width, message),
         DisplayRole::Thinking => {
             let visible_idx = visible_messages
@@ -87,7 +96,11 @@ fn render_single_message(
             }
         }
         DisplayRole::System => {
-            if is_compact_summary_content(&message.content) {
+            if matches!(
+                message.entry_type,
+                Some(crate::session::TranscriptEntryType::CompactBoundary)
+            ) || is_compact_summary_content(&message.content)
+            {
                 push_wrapped_line(
                     lines,
                     format!("{} Earlier conversation compacted.", BLACK_CIRCLE),
@@ -151,10 +164,23 @@ fn render_tool_group_detail(
 
 fn render_user_message(
     lines: &mut Vec<ChatRenderLine>,
+    transcript_mode: TranscriptViewMode,
+    verbose_transcript: bool,
     theme: TerminalTheme,
     width: u16,
     message: &DisplayMessage,
 ) {
+    if let Some(identity_line) = format_message_identity_line(
+        message,
+        transcript_mode == TranscriptViewMode::Transcript && verbose_transcript,
+    ) {
+        push_wrapped_line(
+            lines,
+            identity_line,
+            Style::default().fg(theme.muted),
+            width,
+        );
+    }
     for content_line in message.content.lines() {
         push_wrapped_line(
             lines,
@@ -171,6 +197,21 @@ fn render_user_message(
             width,
         );
     }
+}
+
+fn format_message_identity_line(message: &DisplayMessage, verbose: bool) -> Option<String> {
+    let message_id = message.message_id.as_deref()?;
+    let mut line = format!("[#{}]", short_id(message_id));
+    if verbose {
+        if let Some(parent_id) = message.parent_id.as_deref() {
+            line.push_str(&format!(" parent=#{}", short_id(parent_id)));
+        }
+    }
+    Some(line)
+}
+
+fn short_id(id: &str) -> String {
+    id.chars().take(8).collect()
 }
 
 fn render_assistant_message(
@@ -230,5 +271,56 @@ pub(crate) fn push_wrapped_line(
 ) {
     for wrapped in wrap_plain_line(&text, width.max(1) as usize) {
         lines.push(ChatRenderLine::plain(wrapped, style));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_user_message_includes_short_id() {
+        let message = DisplayMessage {
+            role: DisplayRole::User,
+            content: "hello".to_string(),
+            message_id: Some("abcd1234efgh".to_string()),
+            parent_id: None,
+            entry_type: None,
+        };
+        let mut lines = Vec::new();
+
+        render_user_message(
+            &mut lines,
+            TranscriptViewMode::Main,
+            false,
+            TerminalTheme::default(),
+            80,
+            &message,
+        );
+
+        assert_eq!(lines[0].plain_text, "[#abcd1234]");
+    }
+
+    #[test]
+    fn render_user_message_verbose_includes_parent_short_id() {
+        let message = DisplayMessage {
+            role: DisplayRole::User,
+            content: "hello".to_string(),
+            message_id: Some("abcd1234efgh".to_string()),
+            parent_id: Some("parent5678zzzz".to_string()),
+            entry_type: None,
+        };
+        let mut lines = Vec::new();
+
+        render_user_message(
+            &mut lines,
+            TranscriptViewMode::Transcript,
+            true,
+            TerminalTheme::default(),
+            80,
+            &message,
+        );
+
+        assert_eq!(lines[0].plain_text, "[#abcd1234] parent=#parent56");
     }
 }

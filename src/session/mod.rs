@@ -9,6 +9,15 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone)]
+pub struct SessionRestoreState {
+    pub history: Vec<RuntimeMessage>,
+    pub pending_approval: Option<PendingApproval>,
+    pub status_message: String,
+    pub restore_notice: Option<String>,
+    pub lineage_summary: Option<String>,
+}
+
 /// Session manager
 pub struct SessionManager {
     sessions_dir: PathBuf,
@@ -91,6 +100,8 @@ impl SessionManager {
             updated_at: now,
             project_root: self.project_root.clone(),
             parent_session_id: None,
+            forked_from_session_id: None,
+            forked_from_message_id: None,
             spawned_by_task_id: None,
             session_kind: SessionKind::Primary,
             status: SessionStatus::Active,
@@ -112,6 +123,13 @@ impl SessionManager {
         let id = uuid::Uuid::new_v4().to_string();
         let session_name = name.unwrap_or("child-agent-session").to_string();
         let now = Utc::now();
+        let lineage_notice = format!(
+            "Child agent session for task {}{}.",
+            task_id,
+            parent_session_id
+                .map(|parent| format!(" from parent {}", parent))
+                .unwrap_or_default()
+        );
         let session = Session {
             id,
             name: session_name,
@@ -119,11 +137,77 @@ impl SessionManager {
             updated_at: now,
             project_root: self.project_root.clone(),
             parent_session_id: parent_session_id.map(str::to_string),
+            forked_from_session_id: None,
+            forked_from_message_id: None,
             spawned_by_task_id: Some(task_id.to_string()),
             session_kind: SessionKind::ChildAgent,
             status: SessionStatus::Active,
             pending_approval: None,
-            messages: Vec::new(),
+            messages: vec![Message {
+                id: uuid::Uuid::new_v4().to_string(),
+                role: "system".to_string(),
+                content: lineage_notice,
+                tool_calls: Vec::new(),
+                tool_result: None,
+                entry_type: TranscriptEntryType::SystemNotice,
+                parent_id: None,
+                timestamp: now,
+            }],
+        };
+        self.save(&session)?;
+        Ok(session)
+    }
+
+    pub fn create_fork_session(
+        &self,
+        source: &Session,
+        up_to_message_id: Option<&str>,
+        name: Option<&str>,
+    ) -> anyhow::Result<Session> {
+        std::fs::create_dir_all(&self.sessions_dir)?;
+
+        let now = Utc::now();
+        let id = uuid::Uuid::new_v4().to_string();
+        let forked_from_message_id = up_to_message_id.map(str::to_string);
+        let mut messages = source.clone_for_fork(up_to_message_id)?;
+        let lineage_notice = format!(
+            "Forked from session {}{}.",
+            source.id,
+            forked_from_message_id
+                .as_deref()
+                .map(|message_id| format!(" at {}", message_id))
+                .unwrap_or_default()
+        );
+        let parent_id = messages.last().map(|message| message.id.clone());
+        messages.push(Message {
+            id: uuid::Uuid::new_v4().to_string(),
+            role: "system".to_string(),
+            content: lineage_notice,
+            tool_calls: Vec::new(),
+            tool_result: None,
+            entry_type: TranscriptEntryType::SystemNotice,
+            parent_id,
+            timestamp: now,
+        });
+        let session = Session {
+            id: id.clone(),
+            name: name
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("{} (branch)", source.name)),
+            created_at: now,
+            updated_at: now,
+            project_root: self
+                .project_root
+                .clone()
+                .or_else(|| source.project_root.clone()),
+            parent_session_id: Some(source.id.clone()),
+            forked_from_session_id: Some(source.id.clone()),
+            forked_from_message_id,
+            spawned_by_task_id: None,
+            session_kind: SessionKind::Forked,
+            status: SessionStatus::Completed,
+            pending_approval: None,
+            messages,
         };
         self.save(&session)?;
         Ok(session)
@@ -163,7 +247,7 @@ impl SessionManager {
         session.updated_at = Utc::now();
         session.status = status;
         session.pending_approval = pending_approval.map(StoredPendingApproval::from);
-        session.messages = history.iter().map(Message::from).collect();
+        session.messages = reconcile_messages(&session.messages, history);
         self.save(session)
     }
 
@@ -214,6 +298,35 @@ impl SessionManager {
         }
         Ok(())
     }
+
+    pub fn rewind_session_to_message(
+        &self,
+        session: &mut Session,
+        message_id: &str,
+    ) -> anyhow::Result<String> {
+        let index = session
+            .messages
+            .iter()
+            .position(|message| message.id == message_id)
+            .ok_or_else(|| anyhow::anyhow!("Message not found: {}", message_id))?;
+        let target = session
+            .messages
+            .get(index)
+            .ok_or_else(|| anyhow::anyhow!("Message not found: {}", message_id))?;
+        if !target.role.eq_ignore_ascii_case("user") {
+            return Err(anyhow::anyhow!(
+                "Rewind requires a user message id, got role {}",
+                target.role
+            ));
+        }
+        let restored_input = target.content.clone();
+        session.messages.truncate(index + 1);
+        session.pending_approval = None;
+        session.status = SessionStatus::Completed;
+        session.updated_at = Utc::now();
+        self.save(session)?;
+        Ok(restored_input)
+    }
 }
 
 impl Default for SessionManager {
@@ -231,6 +344,8 @@ pub struct Session {
     pub updated_at: DateTime<Utc>,
     pub project_root: Option<PathBuf>,
     pub parent_session_id: Option<String>,
+    pub forked_from_session_id: Option<String>,
+    pub forked_from_message_id: Option<String>,
     pub spawned_by_task_id: Option<String>,
     pub session_kind: SessionKind,
     pub status: SessionStatus,
@@ -248,6 +363,8 @@ impl Default for Session {
             updated_at: now,
             project_root: None,
             parent_session_id: None,
+            forked_from_session_id: None,
+            forked_from_message_id: None,
             spawned_by_task_id: None,
             session_kind: SessionKind::Primary,
             status: SessionStatus::Completed,
@@ -261,6 +378,7 @@ impl Default for Session {
 #[serde(rename_all = "snake_case")]
 pub enum SessionKind {
     Primary,
+    Forked,
     ChildAgent,
 }
 
@@ -271,6 +389,63 @@ impl Default for SessionKind {
 }
 
 impl Session {
+    pub fn restore_runtime_state(&self) -> SessionRestoreState {
+        let pending_approval = self.restore_pending_approval();
+        let lineage_summary = self.lineage_summary();
+        let restore_notice = self.lineage_notice();
+        let status_message = match (&lineage_summary, pending_approval.is_some()) {
+            (Some(summary), true) => format!("Restored {} with pending approval", summary),
+            (Some(summary), false) => format!("Restored {}", summary),
+            (None, true) => format!("Restored session {} with pending approval", self.id),
+            (None, false) => format!("Restored session {}", self.id),
+        };
+        SessionRestoreState {
+            history: self.runtime_history(),
+            pending_approval,
+            status_message,
+            restore_notice,
+            lineage_summary,
+        }
+    }
+
+    pub fn lineage_notice(&self) -> Option<String> {
+        match self.session_kind {
+            SessionKind::Forked => Some(format!(
+                "Forked from session {}{}.",
+                self.forked_from_session_id.as_deref().unwrap_or("unknown"),
+                self.forked_from_message_id
+                    .as_deref()
+                    .map(|message_id| format!(" at {}", message_id))
+                    .unwrap_or_default()
+            )),
+            SessionKind::ChildAgent => Some(format!(
+                "Child agent session for task {}{}.",
+                self.spawned_by_task_id.as_deref().unwrap_or("unknown"),
+                self.parent_session_id
+                    .as_deref()
+                    .map(|parent| format!(" from parent {}", parent))
+                    .unwrap_or_default()
+            )),
+            SessionKind::Primary => None,
+        }
+    }
+
+    pub fn lineage_summary(&self) -> Option<String> {
+        match self.session_kind {
+            SessionKind::Forked => Some(format!(
+                "forked session {} from {}",
+                self.id,
+                self.forked_from_session_id.as_deref().unwrap_or("unknown")
+            )),
+            SessionKind::ChildAgent => Some(format!(
+                "child session {} for task {}",
+                self.id,
+                self.spawned_by_task_id.as_deref().unwrap_or("unknown")
+            )),
+            SessionKind::Primary => None,
+        }
+    }
+
     pub fn runtime_history(&self) -> Vec<RuntimeMessage> {
         let mut history: Vec<RuntimeMessage> = Vec::new();
 
@@ -319,6 +494,39 @@ impl Session {
         if self.status == SessionStatus::AwaitingApproval && self.pending_approval.is_none() {
             self.status = SessionStatus::Completed;
         }
+        normalize_message_lineage(&mut self.messages);
+    }
+
+    pub fn clone_for_fork(&self, up_to_message_id: Option<&str>) -> anyhow::Result<Vec<Message>> {
+        let slice_end = match up_to_message_id {
+            Some(message_id) => {
+                let index = self
+                    .messages
+                    .iter()
+                    .position(|message| message.id == message_id)
+                    .ok_or_else(|| anyhow::anyhow!("Message not found: {}", message_id))?;
+                let target = &self.messages[index];
+                if !target.role.eq_ignore_ascii_case("user") {
+                    return Err(anyhow::anyhow!(
+                        "Branch requires a user message id, got role {}",
+                        target.role
+                    ));
+                }
+                index + 1
+            }
+            None => self.messages.len(),
+        };
+
+        let mut parent_id = None;
+        let mut cloned = Vec::new();
+        for message in self.messages.iter().take(slice_end) {
+            let mut forked = message.clone();
+            forked.id = uuid::Uuid::new_v4().to_string();
+            forked.parent_id = parent_id.clone();
+            parent_id = Some(forked.id.clone());
+            cloned.push(forked);
+        }
+        Ok(cloned)
     }
 }
 
@@ -355,6 +563,7 @@ impl Default for TranscriptEntryType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Message {
+    pub id: String,
     pub role: String,
     pub content: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -362,17 +571,20 @@ pub struct Message {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_result: Option<RuntimeToolResult>,
     pub entry_type: TranscriptEntryType,
+    pub parent_id: Option<String>,
     pub timestamp: DateTime<Utc>,
 }
 
 impl Default for Message {
     fn default() -> Self {
         Self {
+            id: uuid::Uuid::new_v4().to_string(),
             role: "system".to_string(),
             content: String::new(),
             tool_calls: Vec::new(),
             tool_result: None,
             entry_type: TranscriptEntryType::Message,
+            parent_id: None,
             timestamp: Utc::now(),
         }
     }
@@ -390,11 +602,13 @@ impl From<&RuntimeMessage> for Message {
         };
 
         Self {
+            id: uuid::Uuid::new_v4().to_string(),
             role: value.role.as_str().to_string(),
             content: value.content.clone(),
             tool_calls: value.tool_calls.clone(),
             tool_result: value.tool_result.clone(),
             entry_type,
+            parent_id: None,
             timestamp: Utc::now(),
         }
     }
@@ -457,6 +671,10 @@ pub struct SessionInfo {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub status: SessionStatus,
+    pub session_kind: SessionKind,
+    pub forked_from_session_id: Option<String>,
+    pub parent_session_id: Option<String>,
+    pub spawned_by_task_id: Option<String>,
     pub message_count: usize,
 }
 
@@ -468,8 +686,58 @@ impl From<&Session> for SessionInfo {
             created_at: value.created_at,
             updated_at: value.updated_at,
             status: value.status,
+            session_kind: value.session_kind,
+            forked_from_session_id: value.forked_from_session_id.clone(),
+            parent_session_id: value.parent_session_id.clone(),
+            spawned_by_task_id: value.spawned_by_task_id.clone(),
             message_count: value.messages.len(),
         }
+    }
+}
+
+fn reconcile_messages(existing: &[Message], history: &[RuntimeMessage]) -> Vec<Message> {
+    let mut messages = Vec::with_capacity(history.len());
+    let mut parent_id = None;
+    let mut diverged = false;
+
+    for (index, runtime) in history.iter().enumerate() {
+        let reused = if !diverged {
+            existing
+                .get(index)
+                .filter(|message| runtime_matches_message(runtime, message))
+        } else {
+            None
+        };
+
+        let mut message = if let Some(existing) = reused {
+            existing.clone()
+        } else {
+            diverged = true;
+            Message::from(runtime)
+        };
+        message.parent_id = parent_id.clone();
+        parent_id = Some(message.id.clone());
+        messages.push(message);
+    }
+
+    messages
+}
+
+fn runtime_matches_message(runtime: &RuntimeMessage, message: &Message) -> bool {
+    message.role == runtime.role.as_str()
+        && message.content == runtime.content
+        && message.tool_calls == runtime.tool_calls
+        && message.tool_result == runtime.tool_result
+}
+
+fn normalize_message_lineage(messages: &mut [Message]) {
+    let mut parent_id = None;
+    for message in messages {
+        if message.id.trim().is_empty() {
+            message.id = uuid::Uuid::new_v4().to_string();
+        }
+        message.parent_id = parent_id.clone();
+        parent_id = Some(message.id.clone());
     }
 }
 
@@ -508,20 +776,104 @@ mod tests {
             name: "file_read".to_string(),
             content: "ignored".to_string(),
             is_error: false,
+            metadata: std::collections::HashMap::new(),
         };
         let session = Session {
             messages: vec![Message {
+                id: "tool-1".to_string(),
                 role: "tool".to_string(),
                 content: "ignored".to_string(),
                 tool_calls: Vec::new(),
                 tool_result: Some(tool_result),
                 entry_type: TranscriptEntryType::Message,
+                parent_id: None,
                 timestamp: Utc::now(),
             }],
             ..Session::default()
         };
 
         assert!(session.runtime_history().is_empty());
+    }
+
+    #[test]
+    fn create_fork_session_clones_history_with_new_ids() {
+        let manager = SessionManager::new();
+        let source = Session {
+            id: "source".to_string(),
+            name: "Source".to_string(),
+            messages: vec![
+                Message {
+                    id: "user-1".to_string(),
+                    role: "user".to_string(),
+                    content: "first".to_string(),
+                    tool_calls: Vec::new(),
+                    tool_result: None,
+                    entry_type: TranscriptEntryType::Message,
+                    parent_id: None,
+                    timestamp: Utc::now(),
+                },
+                Message {
+                    id: "assistant-1".to_string(),
+                    role: "assistant".to_string(),
+                    content: "answer".to_string(),
+                    tool_calls: Vec::new(),
+                    tool_result: None,
+                    entry_type: TranscriptEntryType::Message,
+                    parent_id: Some("user-1".to_string()),
+                    timestamp: Utc::now(),
+                },
+            ],
+            ..Session::default()
+        };
+
+        let fork = manager
+            .create_fork_session(&source, Some("user-1"), Some("Fork"))
+            .unwrap();
+        assert_eq!(fork.session_kind, SessionKind::Forked);
+        assert_eq!(fork.messages.len(), 2);
+        assert_ne!(fork.messages[0].id, "user-1");
+        assert_eq!(
+            fork.messages[1].entry_type,
+            TranscriptEntryType::SystemNotice
+        );
+        assert_eq!(fork.forked_from_session_id.as_deref(), Some("source"));
+    }
+
+    #[test]
+    fn create_child_session_includes_lineage_notice() {
+        let manager = SessionManager::new();
+        let child = manager
+            .create_child_session(Some("parent-1"), "task-1", Some("Child"))
+            .unwrap();
+
+        assert_eq!(child.session_kind, SessionKind::ChildAgent);
+        assert_eq!(child.messages.len(), 1);
+        assert_eq!(
+            child.messages[0].entry_type,
+            TranscriptEntryType::SystemNotice
+        );
+        assert!(child.messages[0].content.contains("task task-1"));
+    }
+
+    #[test]
+    fn restore_runtime_state_reports_child_lineage() {
+        let session = Session {
+            id: "child-session".to_string(),
+            parent_session_id: Some("parent-1".to_string()),
+            spawned_by_task_id: Some("task-1".to_string()),
+            session_kind: SessionKind::ChildAgent,
+            ..Session::default()
+        };
+
+        let restored = session.restore_runtime_state();
+        assert!(restored
+            .status_message
+            .contains("child session child-session for task task-1"));
+        assert!(restored.restore_notice.is_some());
+        assert_eq!(
+            restored.lineage_summary.as_deref(),
+            Some("child session child-session for task task-1")
+        );
     }
 
     #[test]

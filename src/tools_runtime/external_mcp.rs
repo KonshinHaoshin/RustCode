@@ -201,6 +201,7 @@ impl ToolExecutor for ExternalMcpToolExecutor {
                 name: call.name.clone(),
                 content: format!("Not an external MCP tool: {}", call.name),
                 is_error: true,
+                metadata: std::collections::HashMap::new(),
             };
         };
 
@@ -214,6 +215,7 @@ impl ToolExecutor for ExternalMcpToolExecutor {
                 name: call.name.clone(),
                 content: format!("Configured MCP server not found: {}", server_name),
                 is_error: true,
+                metadata: std::collections::HashMap::new(),
             };
         };
 
@@ -223,12 +225,14 @@ impl ToolExecutor for ExternalMcpToolExecutor {
                 name: call.name.clone(),
                 content,
                 is_error: false,
+                metadata: std::collections::HashMap::new(),
             },
             Err(error) => RuntimeToolResult {
                 tool_call_id: call.id.clone(),
                 name: call.name.clone(),
                 content: error.to_string(),
                 is_error: true,
+                metadata: std::collections::HashMap::new(),
             },
         }
     }

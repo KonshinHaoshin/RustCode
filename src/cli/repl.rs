@@ -210,6 +210,11 @@ impl Repl {
         match command {
             LocalCommand::Help => self.print_help(),
             LocalCommand::Clear => self.reset_conversation(),
+            LocalCommand::Branch { .. } => {
+                println!();
+                println!("/branch is only supported in the TUI right now.");
+                println!();
+            }
             LocalCommand::Compact { instructions } => self.compact_history(instructions)?,
             LocalCommand::Permissions => {
                 println!();
@@ -235,6 +240,11 @@ impl Repl {
                 println!();
             }
             LocalCommand::Status => self.print_status(),
+            LocalCommand::Rewind { .. } => {
+                println!();
+                println!("/rewind is only supported in the TUI right now.");
+                println!();
+            }
             LocalCommand::Resume { .. } => {
                 println!();
                 println!("/resume is only supported in the TUI right now.");

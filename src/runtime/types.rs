@@ -1,5 +1,6 @@
 use crate::api::ChatMessage;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 const COMPACT_SUMMARY_PREFIX: &str = "Previous conversation compacted into summary:\n";
 
@@ -35,6 +36,8 @@ pub struct RuntimeToolResult {
     pub name: String,
     pub content: String,
     pub is_error: bool,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub metadata: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,6 +188,7 @@ impl From<ChatMessage> for RuntimeMessage {
                 name: value.name.unwrap_or_else(|| "tool".to_string()),
                 content: value.content.clone(),
                 is_error: false,
+                metadata: HashMap::new(),
             })
         } else {
             None
@@ -224,6 +228,7 @@ impl From<&ChatMessage> for RuntimeMessage {
                     name: value.name.clone().unwrap_or_else(|| "tool".to_string()),
                     content: value.content.clone(),
                     is_error: false,
+                    metadata: HashMap::new(),
                 })
         } else {
             None

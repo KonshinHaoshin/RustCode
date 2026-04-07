@@ -4,7 +4,7 @@ use crate::{
     onboarding::OnboardingDraft,
     permissions::{events::PermissionEvent, PermissionsSettings},
     runtime::{PendingApproval, QueryProgressEvent, QueryTurnResult, RuntimeMessage, RuntimeRole},
-    session::{Session, SessionInfo, SessionManager, SessionStatus},
+    session::{Session, SessionInfo, SessionManager, SessionStatus, TranscriptEntryType},
     terminal::theme::SPINNER_FRAMES,
 };
 use ratatui::{layout::Rect, text::Line, widgets::Paragraph};
@@ -34,6 +34,21 @@ pub enum TranscriptViewMode {
 pub struct DisplayMessage {
     pub role: DisplayRole,
     pub content: String,
+    pub message_id: Option<String>,
+    pub parent_id: Option<String>,
+    pub entry_type: Option<TranscriptEntryType>,
+}
+
+impl DisplayMessage {
+    pub fn transient(role: DisplayRole, content: impl Into<String>) -> Self {
+        Self {
+            role,
+            content: content.into(),
+            message_id: None,
+            parent_id: None,
+            entry_type: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -109,6 +124,35 @@ pub enum PendingApprovalOrigin {
 pub struct ResumePickerState {
     pub sessions: Vec<SessionInfo>,
     pub selected: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageSelectorMode {
+    Branch,
+    Rewind { files_only: bool },
+}
+
+#[derive(Debug, Clone)]
+pub struct MessageSelectorItem {
+    pub message_id: String,
+    pub preview: String,
+    pub has_file_changes: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct MessageSelectorConfirmationState {
+    pub message_id: String,
+    pub preview: String,
+    pub changed_files: Vec<String>,
+    pub warning: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MessageSelectorState {
+    pub mode: MessageSelectorMode,
+    pub items: Vec<MessageSelectorItem>,
+    pub selected: usize,
+    pub confirmation: Option<MessageSelectorConfirmationState>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,6 +250,7 @@ pub struct TerminalState {
     pub pending_response: Option<PendingChatRequest>,
     pub pending_approval: Option<PendingApprovalViewModel>,
     pub resume_picker: Option<ResumePickerState>,
+    pub message_selector: Option<MessageSelectorState>,
     pub permissions_view: Option<PermissionsViewState>,
     pub thinking: bool,
     pub transcript_mode: TranscriptViewMode,
@@ -261,23 +306,21 @@ impl TerminalState {
         {
             match session_manager.load_latest_resumable() {
                 Ok(Some(session)) => {
-                    conversation_history = Arc::new(session.runtime_history());
-                    messages = Self::display_messages_from_history(&conversation_history);
-                    pending_approval = session.restore_pending_approval().map(|pending| {
-                        PendingApprovalViewModel {
-                            arguments_preview: format_arguments_preview(
-                                &pending.tool_call.arguments,
-                            ),
-                            pending,
-                            focus_index: 0,
-                            origin: PendingApprovalOrigin::RestoredSession,
-                        }
-                    });
-                    restored_session_notice = Some(if pending_approval.is_some() {
-                        format!("Restored session {} with pending approval", session.id)
-                    } else {
-                        format!("Restored session {}", session.id)
-                    });
+                    let restored = session.restore_runtime_state();
+                    conversation_history = Arc::new(restored.history);
+                    messages = Self::display_messages_from_session(&session);
+                    pending_approval =
+                        restored
+                            .pending_approval
+                            .map(|pending| PendingApprovalViewModel {
+                                arguments_preview: format_arguments_preview(
+                                    &pending.tool_call.arguments,
+                                ),
+                                pending,
+                                focus_index: 0,
+                                origin: PendingApprovalOrigin::RestoredSession,
+                            });
+                    restored_session_notice = Some(restored.status_message);
                     active_session_id = Some(session.id.clone());
                     active_session = Some(session);
                 }
@@ -318,6 +361,7 @@ impl TerminalState {
             pending_response: None,
             pending_approval,
             resume_picker: None,
+            message_selector: None,
             permissions_view: None,
             thinking: false,
             transcript_mode: TranscriptViewMode::Main,
@@ -418,15 +462,15 @@ impl TerminalState {
         self.settings.save()?;
         self.view = ViewMode::Chat;
         self.status = "Onboarding complete. Provider settings saved.".to_string();
-        self.messages.push(DisplayMessage {
-            role: DisplayRole::Assistant,
-            content: format!(
+        self.messages.push(DisplayMessage::transient(
+            DisplayRole::Assistant,
+            format!(
                 "Configured {}/{} with {} fallback target(s).",
                 self.draft.provider_label(),
                 self.draft.model,
                 self.draft.fallback_chain.len()
             ),
-        });
+        ));
         self.mark_chat_render_dirty();
         Ok(())
     }
@@ -483,6 +527,7 @@ impl TerminalState {
         self.replace_history(Vec::new());
         self.set_pending_approval(None);
         self.resume_picker = None;
+        self.message_selector = None;
         self.permissions_view = None;
         self.active_session = None;
         self.active_session_id = None;
@@ -546,30 +591,30 @@ impl TerminalState {
                 pending_approval.as_ref(),
             )?;
             self.active_session_id = Some(session.id.clone());
+            self.messages = Self::display_messages_from_session(session);
+            self.mark_chat_render_dirty();
         }
 
         Ok(())
     }
 
     pub fn restore_session(&mut self, session: Session) {
-        self.replace_history(session.runtime_history());
-        self.pending_approval =
-            session
-                .restore_pending_approval()
-                .map(|pending| PendingApprovalViewModel {
-                    arguments_preview: format_arguments_preview(&pending.tool_call.arguments),
-                    pending,
-                    focus_index: 0,
-                    origin: PendingApprovalOrigin::RestoredSession,
-                });
+        let restored = session.restore_runtime_state();
+        self.replace_history(restored.history);
+        self.messages = Self::display_messages_from_session(&session);
+        self.pending_approval = restored
+            .pending_approval
+            .map(|pending| PendingApprovalViewModel {
+                arguments_preview: format_arguments_preview(&pending.tool_call.arguments),
+                pending,
+                focus_index: 0,
+                origin: PendingApprovalOrigin::RestoredSession,
+            });
         self.active_session_id = Some(session.id.clone());
-        self.status = if self.pending_approval.is_some() {
-            format!("Restored session {} with pending approval", session.id)
-        } else {
-            format!("Restored session {}", session.id)
-        };
+        self.status = restored.status_message;
         self.active_session = Some(session);
         self.resume_picker = None;
+        self.message_selector = None;
         self.permissions_view = None;
         self.last_usage_total = None;
         self.live_assistant_message = None;
@@ -686,6 +731,9 @@ impl TerminalState {
                 self.messages.push(DisplayMessage {
                     role,
                     content: String::new(),
+                    message_id: None,
+                    parent_id: None,
+                    entry_type: None,
                 });
                 let index = self.messages.len().saturating_sub(1);
                 *live_index = Some(index);
@@ -719,12 +767,18 @@ impl TerminalState {
                 RuntimeRole::User => messages.push(DisplayMessage {
                     role: DisplayRole::User,
                     content: message.content.clone(),
+                    message_id: None,
+                    parent_id: None,
+                    entry_type: None,
                 }),
                 RuntimeRole::Assistant => {
                     if !message.content.trim().is_empty() {
                         messages.push(DisplayMessage {
                             role: DisplayRole::Assistant,
                             content: message.content.clone(),
+                            message_id: None,
+                            parent_id: None,
+                            entry_type: None,
                         });
                     }
                     for tool_call in &message.tool_calls {
@@ -735,12 +789,18 @@ impl TerminalState {
                                 tool_call.name,
                                 format_arguments_preview(&tool_call.arguments)
                             ),
+                            message_id: None,
+                            parent_id: None,
+                            entry_type: None,
                         });
                     }
                 }
                 RuntimeRole::System => messages.push(DisplayMessage {
                     role: DisplayRole::System,
                     content: message.content.clone(),
+                    message_id: None,
+                    parent_id: None,
+                    entry_type: None,
                 }),
                 RuntimeRole::Tool => {
                     let tool_result = message.tool_result.as_ref();
@@ -756,8 +816,86 @@ impl TerminalState {
                     messages.push(DisplayMessage {
                         role: DisplayRole::Tool,
                         content: format!("{}{}", label, format_tool_body(&message.content)),
+                        message_id: None,
+                        parent_id: None,
+                        entry_type: None,
                     });
                 }
+            }
+        }
+
+        messages
+    }
+
+    pub fn display_messages_from_session(session: &Session) -> Vec<DisplayMessage> {
+        let mut messages = Vec::new();
+
+        for message in &session.messages {
+            match message.role.as_str() {
+                "user" => messages.push(DisplayMessage {
+                    role: DisplayRole::User,
+                    content: message.content.clone(),
+                    message_id: Some(message.id.clone()),
+                    parent_id: message.parent_id.clone(),
+                    entry_type: Some(message.entry_type),
+                }),
+                "assistant" => {
+                    if !message.content.trim().is_empty() {
+                        messages.push(DisplayMessage {
+                            role: DisplayRole::Assistant,
+                            content: message.content.clone(),
+                            message_id: Some(message.id.clone()),
+                            parent_id: message.parent_id.clone(),
+                            entry_type: Some(message.entry_type),
+                        });
+                    }
+                    for tool_call in &message.tool_calls {
+                        messages.push(DisplayMessage {
+                            role: DisplayRole::Tool,
+                            content: format!(
+                                "Tool request: {} {}",
+                                tool_call.name,
+                                format_arguments_preview(&tool_call.arguments)
+                            ),
+                            message_id: Some(message.id.clone()),
+                            parent_id: message.parent_id.clone(),
+                            entry_type: Some(message.entry_type),
+                        });
+                    }
+                }
+                "system" => messages.push(DisplayMessage {
+                    role: DisplayRole::System,
+                    content: message.content.clone(),
+                    message_id: Some(message.id.clone()),
+                    parent_id: message.parent_id.clone(),
+                    entry_type: Some(message.entry_type),
+                }),
+                "tool" => {
+                    let tool_result = message.tool_result.as_ref();
+                    let label = tool_result
+                        .map(|result| {
+                            if result.is_error {
+                                format!("Tool error: {}", result.name)
+                            } else {
+                                format!("Tool result: {}", result.name)
+                            }
+                        })
+                        .unwrap_or_else(|| "Tool result".to_string());
+                    messages.push(DisplayMessage {
+                        role: DisplayRole::Tool,
+                        content: format!("{}{}", label, format_tool_body(&message.content)),
+                        message_id: Some(message.id.clone()),
+                        parent_id: message.parent_id.clone(),
+                        entry_type: Some(message.entry_type),
+                    });
+                }
+                _ => messages.push(DisplayMessage {
+                    role: DisplayRole::User,
+                    content: message.content.clone(),
+                    message_id: Some(message.id.clone()),
+                    parent_id: message.parent_id.clone(),
+                    entry_type: Some(message.entry_type),
+                }),
             }
         }
 

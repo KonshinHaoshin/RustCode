@@ -165,7 +165,10 @@ impl Cli {
                     );
                 }
             }
-            LocalCommand::Permissions | LocalCommand::Resume { .. } => {
+            LocalCommand::Permissions
+            | LocalCommand::Resume { .. }
+            | LocalCommand::Branch { .. }
+            | LocalCommand::Rewind { .. } => {
                 return Err(anyhow::anyhow!(
                     "This slash command requires interactive TUI support."
                 ));

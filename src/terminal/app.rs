@@ -2,10 +2,11 @@ use super::{
     markdown::ChatRenderLine,
     state::{
         format_arguments_preview, format_tool_body, ChatWorkerOutcome, ChatWorkerResult,
-        ChatWorkerUpdate, DisplayMessage, DisplayRole, FallbackField, OnboardingStep,
-        PendingChatRequest, PermissionSection, PermissionsViewState, PrimaryField,
-        ResumePickerState, SelectionClickState, SelectionMode, SelectionPoint, TaskProgressItem,
-        TerminalState, TranscriptViewMode, ViewMode,
+        ChatWorkerUpdate, DisplayMessage, DisplayRole, FallbackField,
+        MessageSelectorConfirmationState, MessageSelectorItem, MessageSelectorMode,
+        MessageSelectorState, OnboardingStep, PendingChatRequest, PermissionSection,
+        PermissionsViewState, PrimaryField, ResumePickerState, SelectionClickState, SelectionMode,
+        SelectionPoint, TaskProgressItem, TerminalState, TranscriptViewMode, ViewMode,
     },
     theme::{TerminalTheme, BLACK_CIRCLE},
     ui::{
@@ -23,6 +24,7 @@ use crate::{
         remove_project_local_permission_rule, ApiProtocol, ApiProvider, FallbackTarget,
         ProjectPermissionRuleKind, Settings,
     },
+    file_history::FileHistoryStore,
     input::{format_help_text, format_status_text, InputProcessor, LocalCommand, ProcessedInput},
     onboarding::OnboardingDraft,
     permissions::events::{PermissionEvent, PermissionEventStore},
@@ -30,7 +32,7 @@ use crate::{
         ApprovalAction, QueryEngine, QueryProgressEvent, QueryTurnResult, RuntimeMessage,
         TurnStatus,
     },
-    session::SessionInfo,
+    session::{SessionInfo, SessionKind},
 };
 use crossterm::{
     event::{
@@ -260,6 +262,10 @@ impl TerminalApp {
             return self.handle_resume_picker_key(key);
         }
 
+        if self.state.message_selector.is_some() {
+            return self.handle_message_selector_key(key);
+        }
+
         if self.state.permissions_view.is_some() {
             return self.handle_permissions_view_key(key);
         }
@@ -428,6 +434,219 @@ impl TerminalApp {
             }
             _ => false,
         }
+    }
+
+    fn handle_message_selector_key(&mut self, key: KeyEvent) -> bool {
+        if self.state.message_selector.is_none() {
+            return false;
+        }
+
+        let confirmation_open = self
+            .state
+            .message_selector
+            .as_ref()
+            .and_then(|selector| selector.confirmation.as_ref())
+            .is_some();
+
+        if confirmation_open {
+            match key.code {
+                KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    let message_id = self
+                        .state
+                        .message_selector
+                        .as_ref()
+                        .and_then(|selector| selector.confirmation.as_ref())
+                        .map(|confirmation| confirmation.message_id.clone());
+                    if let Some(message_id) = message_id {
+                        self.state.message_selector = None;
+                        return self.rewind_current_session(&message_id, false);
+                    }
+                    false
+                }
+                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                    if let Some(selector) = self.state.message_selector.as_mut() {
+                        selector.confirmation = None;
+                    }
+                    self.state.status = "Cancelled rewind confirmation.".to_string();
+                    self.state.mark_chat_render_dirty();
+                    true
+                }
+                _ => false,
+            }
+        } else {
+            match key.code {
+                KeyCode::Up => {
+                    if let Some(selector) = self.state.message_selector.as_mut() {
+                        selector.selected = selector.selected.saturating_sub(1);
+                    }
+                    self.state.mark_chat_render_dirty();
+                    true
+                }
+                KeyCode::Down => {
+                    if let Some(selector) = self.state.message_selector.as_mut() {
+                        if selector.selected + 1 < selector.items.len() {
+                            selector.selected += 1;
+                        }
+                    }
+                    self.state.mark_chat_render_dirty();
+                    true
+                }
+                KeyCode::Enter => self.submit_message_selector_selection(),
+                KeyCode::Esc => {
+                    self.state.message_selector = None;
+                    self.state.status = "Closed message picker.".to_string();
+                    self.state.mark_chat_render_dirty();
+                    true
+                }
+                _ => false,
+            }
+        }
+    }
+
+    fn open_message_selector(&mut self, mode: MessageSelectorMode) -> bool {
+        if self.state.thinking || self.state.pending_approval.is_some() {
+            self.state.status = match mode {
+                MessageSelectorMode::Branch => "Cannot branch while a turn is active.".to_string(),
+                MessageSelectorMode::Rewind { .. } => {
+                    "Cannot rewind while a turn or approval is active.".to_string()
+                }
+            };
+            return true;
+        }
+        let Some(session) = self.state.active_session.clone() else {
+            self.state.status = match mode {
+                MessageSelectorMode::Branch => "No active session available to branch.".to_string(),
+                MessageSelectorMode::Rewind { .. } => {
+                    "No active session available to rewind.".to_string()
+                }
+            };
+            return true;
+        };
+        let items = self.build_user_message_selector_items(&session);
+        if items.is_empty() {
+            self.state.status = "No user messages available in this session.".to_string();
+            return true;
+        }
+        self.state.message_selector = Some(MessageSelectorState {
+            mode,
+            items,
+            selected: 0,
+            confirmation: None,
+        });
+        self.state.status = match mode {
+            MessageSelectorMode::Branch => "Select a user message to branch from.".to_string(),
+            MessageSelectorMode::Rewind { files_only: true } => {
+                "Select a user message to rewind tracked files to.".to_string()
+            }
+            MessageSelectorMode::Rewind { files_only: false } => {
+                "Select a user message to rewind conversation to.".to_string()
+            }
+        };
+        self.state.mark_chat_render_dirty();
+        true
+    }
+
+    fn submit_message_selector_selection(&mut self) -> bool {
+        let Some(selector) = self.state.message_selector.clone() else {
+            return false;
+        };
+        let Some(item) = selector.items.get(selector.selected).cloned() else {
+            return false;
+        };
+
+        match selector.mode {
+            MessageSelectorMode::Branch => {
+                self.state.message_selector = None;
+                self.branch_current_session(Some(item.message_id))
+            }
+            MessageSelectorMode::Rewind { files_only: true } => {
+                self.state.message_selector = None;
+                self.rewind_current_session(&item.message_id, true)
+            }
+            MessageSelectorMode::Rewind { files_only: false } => {
+                if item.has_file_changes {
+                    let (changed_files, warning) = self
+                        .state
+                        .active_session
+                        .as_ref()
+                        .map(|session| {
+                            FileHistoryStore::for_project(Some(std::path::Path::new(
+                                &self.state.settings.working_dir,
+                            )))
+                            .ok()
+                            .and_then(|store| {
+                                store
+                                    .file_history_get_change_descriptors(session, &item.message_id)
+                                    .ok()
+                                    .map(|descriptors| {
+                                        let warning = descriptors.iter().any(|descriptor| descriptor.truncated).then(|| {
+                                            "Command snapshot tracking was truncated; some changed files may be missing from this preview.".to_string()
+                                        });
+                                        let files = descriptors
+                                            .into_iter()
+                                            .map(|descriptor| {
+                                                format!(
+                                                    "[{}] {}",
+                                                    match descriptor.origin {
+                                                        crate::file_history::FileHistoryOrigin::FileWrite => "write",
+                                                        crate::file_history::FileHistoryOrigin::FileEdit => "edit",
+                                                        crate::file_history::FileHistoryOrigin::ExecuteCommandSnapshot => "cmd",
+                                                    },
+                                                    descriptor.path
+                                                )
+                                            })
+                                            .collect::<Vec<_>>();
+                                        (files, warning)
+                                    })
+                            })
+                        })
+                        .unwrap_or_default()
+                        .unwrap_or_default();
+                    if let Some(selector) = self.state.message_selector.as_mut() {
+                        selector.confirmation = Some(MessageSelectorConfirmationState {
+                            message_id: item.message_id,
+                            preview: item.preview,
+                            changed_files,
+                            warning,
+                        });
+                    }
+                    self.state.status =
+                        "Confirm rewind: this will also restore tracked files.".to_string();
+                    self.state.mark_chat_render_dirty();
+                    true
+                } else {
+                    self.state.message_selector = None;
+                    self.rewind_current_session(&item.message_id, false)
+                }
+            }
+        }
+    }
+
+    fn build_user_message_selector_items(
+        &self,
+        session: &crate::session::Session,
+    ) -> Vec<MessageSelectorItem> {
+        let history_store = FileHistoryStore::for_project(Some(std::path::Path::new(
+            &self.state.settings.working_dir,
+        )))
+        .ok();
+        session
+            .messages
+            .iter()
+            .rev()
+            .filter(|message| message.role.eq_ignore_ascii_case("user"))
+            .map(|message| MessageSelectorItem {
+                message_id: message.id.clone(),
+                preview: format!(
+                    "{}  {}",
+                    short_message_id(&message.id),
+                    summarize_selector_preview(&message.content)
+                ),
+                has_file_changes: history_store
+                    .as_ref()
+                    .is_some_and(|store| store.file_history_has_any_changes(session, &message.id)),
+            })
+            .collect()
     }
 
     fn handle_permissions_view_key(&mut self, key: KeyEvent) -> bool {
@@ -820,10 +1039,12 @@ impl TerminalApp {
     }
 
     fn submit_runtime_prompt(&mut self, prompt: String) {
-        let message = DisplayMessage {
-            role: DisplayRole::User,
-            content: prompt.clone(),
-        };
+        if let Err(error) = self.ensure_active_session() {
+            self.push_system_message(format!("Failed to initialize session: {}", error));
+            self.state.status = "Session initialization failed.".to_string();
+            return;
+        }
+        let message = DisplayMessage::transient(DisplayRole::User, prompt.clone());
         self.state.messages.push(message);
         self.state.input.clear();
         self.state.scroll_offset = 0;
@@ -864,6 +1085,10 @@ impl TerminalApp {
                 self.state.mark_chat_render_dirty();
                 true
             }
+            LocalCommand::Branch { message_id } => match message_id {
+                Some(message_id) => self.branch_current_session(Some(message_id)),
+                None => self.open_message_selector(MessageSelectorMode::Branch),
+            },
             LocalCommand::Compact { instructions } => self.compact_current_history(instructions),
             LocalCommand::Permissions => self.open_permissions_view(),
             LocalCommand::Model { model } => {
@@ -885,6 +1110,13 @@ impl TerminalApp {
                 self.state.status = detail;
                 true
             }
+            LocalCommand::Rewind {
+                message_id,
+                files_only,
+            } => match message_id {
+                Some(message_id) => self.rewind_current_session(&message_id, files_only),
+                None => self.open_message_selector(MessageSelectorMode::Rewind { files_only }),
+            },
             LocalCommand::Status => {
                 self.push_system_message(format_status_text(
                     &self.state.settings,
@@ -900,6 +1132,159 @@ impl TerminalApp {
                 Some(session_id) => self.resume_session_by_id(&session_id),
                 None => self.open_resume_picker(),
             },
+        }
+    }
+
+    fn ensure_active_session(&mut self) -> anyhow::Result<()> {
+        if self.state.active_session.is_none() && self.state.settings.session.persist_transcript {
+            let session = self.state.session_manager.create(Some("tui-session"))?;
+            self.state.active_session_id = Some(session.id.clone());
+            self.state.active_session = Some(session);
+        }
+        Ok(())
+    }
+
+    fn branch_current_session(&mut self, message_id: Option<String>) -> bool {
+        if self.state.thinking || self.state.pending_approval.is_some() {
+            self.state.status = "Cannot branch while a turn is active.".to_string();
+            return true;
+        }
+        if self.state.conversation_history.is_empty() {
+            self.state.status = "No conversation available to branch.".to_string();
+            return true;
+        }
+        if let Err(error) = self.ensure_active_session() {
+            self.push_system_message(format!("Failed to initialize session: {}", error));
+            self.state.status = "Session initialization failed.".to_string();
+            return true;
+        }
+        if let Err(error) = self.state.persist_current_session() {
+            self.push_system_message(format!("Session save failed: {}", error));
+            self.state.status = "Session save failed.".to_string();
+            return true;
+        }
+        let Some(source_session) = self.state.active_session.clone() else {
+            self.state.status = "No active session available to branch.".to_string();
+            return true;
+        };
+        let resolved_message_id = message_id
+            .as_deref()
+            .map(|value| resolve_user_message_id(&source_session, value))
+            .transpose();
+        let resolved_message_id = match resolved_message_id {
+            Ok(value) => value,
+            Err(error) => {
+                self.push_system_message(format!("Branch failed: {}", error));
+                self.state.status = "Branch failed.".to_string();
+                return true;
+            }
+        };
+        match self.state.session_manager.create_fork_session(
+            &source_session,
+            resolved_message_id.as_deref(),
+            None,
+        ) {
+            Ok(forked) => {
+                self.state.restore_session(forked.clone());
+                self.push_system_message(format!(
+                    "Forked session {} from {}{}.",
+                    forked.id,
+                    source_session.id,
+                    resolved_message_id
+                        .as_deref()
+                        .map(|id| format!(" at {}", id))
+                        .unwrap_or_default()
+                ));
+                self.state.status = "Switched to forked session.".to_string();
+                true
+            }
+            Err(error) => {
+                self.push_system_message(format!("Branch failed: {}", error));
+                self.state.status = "Branch failed.".to_string();
+                true
+            }
+        }
+    }
+
+    fn rewind_current_session(&mut self, message_id: &str, files_only: bool) -> bool {
+        if self.state.thinking || self.state.pending_approval.is_some() {
+            self.state.status = "Cannot rewind while a turn or approval is active.".to_string();
+            return true;
+        }
+        let Some(mut session) = self.state.active_session.clone() else {
+            self.state.status = "No active session available to rewind.".to_string();
+            return true;
+        };
+        let resolved_message_id = match resolve_user_message_id(&session, message_id) {
+            Ok(value) => value,
+            Err(error) => {
+                self.push_system_message(format!("Conversation rewind failed: {}", error));
+                self.state.status = "Conversation rewind failed.".to_string();
+                return true;
+            }
+        };
+
+        let file_rewind = if files_only {
+            Some(
+                FileHistoryStore::for_project(Some(std::path::Path::new(
+                    &self.state.settings.working_dir,
+                )))
+                .and_then(|store| store.rewind_session_to_message(&session, &resolved_message_id)),
+            )
+        } else {
+            None
+        };
+        if let Some(result) = file_rewind {
+            match result {
+                Ok(rewind) => {
+                    self.push_system_message(format_file_rewind_summary(&rewind));
+                }
+                Err(error) => {
+                    self.push_system_message(format!("File rewind failed: {}", error));
+                    self.state.status = "File rewind failed.".to_string();
+                    return true;
+                }
+            }
+        }
+        if files_only {
+            self.state.status = "Files rewound.".to_string();
+            return true;
+        }
+
+        let file_rewind = match FileHistoryStore::for_project(Some(std::path::Path::new(
+            &self.state.settings.working_dir,
+        )))
+        .and_then(|store| store.rewind_session_to_message(&session, &resolved_message_id))
+        {
+            Ok(rewind) => rewind,
+            Err(error) => {
+                self.push_system_message(format!("File rewind failed: {}", error));
+                self.state.status = "File rewind failed.".to_string();
+                return true;
+            }
+        };
+
+        match self
+            .state
+            .session_manager
+            .rewind_session_to_message(&mut session, &resolved_message_id)
+        {
+            Ok(restored_input) => {
+                self.state.restore_session(session);
+                self.state.input = restored_input;
+                self.push_system_message(format_file_rewind_summary(&file_rewind));
+                self.push_system_message(format!(
+                    "Rewound conversation to {}.",
+                    resolved_message_id
+                ));
+                self.state.status = "Conversation rewound.".to_string();
+                true
+            }
+            Err(error) => {
+                self.push_system_message(format!("Conversation rewind failed: {}", error));
+                self.state.status = "Conversation rewind failed.".to_string();
+                true
+            }
         }
     }
 
@@ -953,10 +1338,9 @@ impl TerminalApp {
     }
 
     fn push_system_message(&mut self, content: String) {
-        self.state.messages.push(DisplayMessage {
-            role: DisplayRole::System,
-            content,
-        });
+        self.state
+            .messages
+            .push(DisplayMessage::transient(DisplayRole::System, content));
         self.state.mark_chat_render_dirty();
     }
 
@@ -981,10 +1365,10 @@ impl TerminalApp {
             }
             Err(error) => {
                 self.state.status = format!("Failed to list sessions: {}", error);
-                self.state.messages.push(DisplayMessage {
-                    role: DisplayRole::System,
-                    content: format!("Failed to list sessions: {}", error),
-                });
+                self.state.messages.push(DisplayMessage::transient(
+                    DisplayRole::System,
+                    format!("Failed to list sessions: {}", error),
+                ));
                 self.state.mark_chat_render_dirty();
                 true
             }
@@ -999,19 +1383,19 @@ impl TerminalApp {
             }
             Ok(None) => {
                 self.state.status = format!("Session {} not found.", session_id);
-                self.state.messages.push(DisplayMessage {
-                    role: DisplayRole::System,
-                    content: format!("Session {} not found.", session_id),
-                });
+                self.state.messages.push(DisplayMessage::transient(
+                    DisplayRole::System,
+                    format!("Session {} not found.", session_id),
+                ));
                 self.state.mark_chat_render_dirty();
                 true
             }
             Err(error) => {
                 self.state.status = format!("Session restore failed: {}", error);
-                self.state.messages.push(DisplayMessage {
-                    role: DisplayRole::System,
-                    content: format!("Session restore failed: {}", error),
-                });
+                self.state.messages.push(DisplayMessage::transient(
+                    DisplayRole::System,
+                    format!("Session restore failed: {}", error),
+                ));
                 self.state.mark_chat_render_dirty();
                 true
             }
@@ -1023,10 +1407,10 @@ impl TerminalApp {
             Ok(settings) => settings.permissions,
             Err(error) => {
                 self.state.status = format!("Failed to load global permissions: {}", error);
-                self.state.messages.push(DisplayMessage {
-                    role: DisplayRole::System,
-                    content: format!("Failed to load global permissions: {}", error),
-                });
+                self.state.messages.push(DisplayMessage::transient(
+                    DisplayRole::System,
+                    format!("Failed to load global permissions: {}", error),
+                ));
                 self.state.mark_chat_render_dirty();
                 return true;
             }
@@ -1038,10 +1422,10 @@ impl TerminalApp {
                 .unwrap_or_default(),
             Err(error) => {
                 self.state.status = format!("Failed to load local permissions: {}", error);
-                self.state.messages.push(DisplayMessage {
-                    role: DisplayRole::System,
-                    content: format!("Failed to load local permissions: {}", error),
-                });
+                self.state.messages.push(DisplayMessage::transient(
+                    DisplayRole::System,
+                    format!("Failed to load local permissions: {}", error),
+                ));
                 self.state.mark_chat_render_dirty();
                 return true;
             }
@@ -1053,10 +1437,10 @@ impl TerminalApp {
                 events
             }
             Err(error) => {
-                self.state.messages.push(DisplayMessage {
-                    role: DisplayRole::System,
-                    content: format!("Failed to load permission events: {}", error),
-                });
+                self.state.messages.push(DisplayMessage::transient(
+                    DisplayRole::System,
+                    format!("Failed to load permission events: {}", error),
+                ));
                 Vec::new()
             }
         };
@@ -1104,10 +1488,10 @@ impl TerminalApp {
                             if had_user_message {
                                 self.state.replace_history(history);
                             }
-                            self.state.messages.push(DisplayMessage {
-                                role: DisplayRole::System,
-                                content: format!("Request failed: {}", error),
-                            });
+                            self.state.messages.push(DisplayMessage::transient(
+                                DisplayRole::System,
+                                format!("Request failed: {}", error),
+                            ));
                             self.state.status = "Request failed.".to_string();
                         }
                     }
@@ -1125,10 +1509,10 @@ impl TerminalApp {
                     self.state.replace_history(restored_history);
                     self.state.thinking = false;
                     self.state.status = "Request worker disconnected.".to_string();
-                    self.state.messages.push(DisplayMessage {
-                        role: DisplayRole::System,
-                        content: "Request worker disconnected.".to_string(),
-                    });
+                    self.state.messages.push(DisplayMessage::transient(
+                        DisplayRole::System,
+                        "Request worker disconnected.".to_string(),
+                    ));
                     self.state.mark_chat_render_dirty();
                     return true;
                 }
@@ -1152,14 +1536,14 @@ impl TerminalApp {
             QueryProgressEvent::ToolCall(tool_call) => {
                 self.state.live_assistant_message = None;
                 self.state.live_thinking_message = None;
-                self.state.messages.push(DisplayMessage {
-                    role: DisplayRole::Tool,
-                    content: format!(
+                self.state.messages.push(DisplayMessage::transient(
+                    DisplayRole::Tool,
+                    format!(
                         "Tool request: {} {}",
                         tool_call.name,
                         format_arguments_preview(&tool_call.arguments)
                     ),
-                });
+                ));
                 self.state.status = format!("Running tool {}.", tool_call.name);
                 self.state.mark_chat_render_dirty();
             }
@@ -1171,10 +1555,10 @@ impl TerminalApp {
                 } else {
                     format!("Tool result: {}", result.name)
                 };
-                self.state.messages.push(DisplayMessage {
-                    role: DisplayRole::Tool,
-                    content: format!("{}{}", label, format_tool_body(&result.content)),
-                });
+                self.state.messages.push(DisplayMessage::transient(
+                    DisplayRole::Tool,
+                    format!("{}{}", label, format_tool_body(&result.content)),
+                ));
                 self.state.status = format!("Completed tool {}.", result.name);
                 self.state.mark_chat_render_dirty();
             }
@@ -1208,10 +1592,10 @@ impl TerminalApp {
         }
 
         if let Err(error) = self.state.persist_current_session() {
-            self.state.messages.push(DisplayMessage {
-                role: DisplayRole::System,
-                content: format!("Session save failed: {}", error),
-            });
+            self.state.messages.push(DisplayMessage::transient(
+                DisplayRole::System,
+                format!("Session save failed: {}", error),
+            ));
             self.state.status = "Session save failed.".to_string();
         }
     }
@@ -1248,10 +1632,10 @@ impl TerminalApp {
             }
             Err(error) => {
                 self.state.status = format!("Failed to update local permissions: {}", error);
-                self.state.messages.push(DisplayMessage {
-                    role: DisplayRole::System,
-                    content: format!("Failed to update local permissions: {}", error),
-                });
+                self.state.messages.push(DisplayMessage::transient(
+                    DisplayRole::System,
+                    format!("Failed to update local permissions: {}", error),
+                ));
                 self.state.mark_chat_render_dirty();
                 true
             }
@@ -1283,10 +1667,10 @@ impl TerminalApp {
             }
             Err(error) => {
                 self.state.status = format!("Failed to save local permissions: {}", error);
-                self.state.messages.push(DisplayMessage {
-                    role: DisplayRole::System,
-                    content: format!("Failed to save local permissions: {}", error),
-                });
+                self.state.messages.push(DisplayMessage::transient(
+                    DisplayRole::System,
+                    format!("Failed to save local permissions: {}", error),
+                ));
                 self.state.mark_chat_render_dirty();
                 true
             }
@@ -1349,10 +1733,10 @@ impl TerminalApp {
         self.state.spinner_tick = 0;
         self.state.last_tick = std::time::Instant::now();
         if let Err(error) = self.state.persist_current_session() {
-            self.state.messages.push(DisplayMessage {
-                role: DisplayRole::System,
-                content: format!("Session save failed: {}", error),
-            });
+            self.state.messages.push(DisplayMessage::transient(
+                DisplayRole::System,
+                format!("Session save failed: {}", error),
+            ));
         }
         let base_history = Arc::clone(&self.state.conversation_history);
         let receiver = match pending_origin {
@@ -1665,6 +2049,7 @@ fn ensure_chat_cache(state: &mut TerminalState, theme: TerminalTheme, width: u16
         if state.messages.is_empty()
             && state.pending_approval.is_none()
             && state.resume_picker.is_none()
+            && state.message_selector.is_none()
             && state.permissions_view.is_none()
             && !state.has_selection()
         {
@@ -1705,7 +2090,12 @@ fn render_chat_lines(
     theme: TerminalTheme,
     width: u16,
 ) -> Vec<ChatRenderLine> {
-    if state.messages.is_empty() {
+    if state.messages.is_empty()
+        && state.pending_approval.is_none()
+        && state.resume_picker.is_none()
+        && state.message_selector.is_none()
+        && state.permissions_view.is_none()
+    {
         return theme
             .empty_chat_lines(width, &state.working_dir)
             .into_iter()
@@ -1870,6 +2260,110 @@ fn render_chat_lines(
                 }),
                 width,
             );
+        }
+        lines.push(ChatRenderLine::empty());
+    }
+
+    if let Some(selector) = &state.message_selector {
+        push_wrapped_line(
+            &mut lines,
+            match selector.mode {
+                MessageSelectorMode::Branch => "Branch from message".to_string(),
+                MessageSelectorMode::Rewind { files_only: true } => {
+                    "Rewind tracked files".to_string()
+                }
+                MessageSelectorMode::Rewind { files_only: false } => {
+                    "Rewind conversation".to_string()
+                }
+            },
+            Style::default()
+                .fg(theme.brand)
+                .add_modifier(Modifier::BOLD),
+            width,
+        );
+        if let Some(confirmation) = &selector.confirmation {
+            push_wrapped_line(
+                &mut lines,
+                format!("Target: {}", confirmation.preview),
+                Style::default().fg(theme.text),
+                width,
+            );
+            push_wrapped_line(
+                &mut lines,
+                "This will restore tracked files changed after that user turn.".to_string(),
+                theme.muted_style(),
+                width,
+            );
+            if confirmation.changed_files.is_empty() {
+                push_wrapped_line(
+                    &mut lines,
+                    "No tracked files listed.".to_string(),
+                    theme.muted_style(),
+                    width,
+                );
+            } else {
+                for file in confirmation.changed_files.iter().take(8) {
+                    push_wrapped_line(
+                        &mut lines,
+                        format!("- {}", file),
+                        theme.muted_style(),
+                        width,
+                    );
+                }
+                if confirmation.changed_files.len() > 8 {
+                    push_wrapped_line(
+                        &mut lines,
+                        format!(
+                            "... and {} more file(s)",
+                            confirmation.changed_files.len() - 8
+                        ),
+                        theme.muted_style(),
+                        width,
+                    );
+                }
+            }
+            if let Some(warning) = &confirmation.warning {
+                push_wrapped_line(
+                    &mut lines,
+                    warning.clone(),
+                    Style::default().fg(theme.error),
+                    width,
+                );
+            }
+            push_wrapped_line(
+                &mut lines,
+                "Press Enter to confirm, or Esc to go back.".to_string(),
+                Style::default().fg(theme.text),
+                width,
+            );
+        } else {
+            push_wrapped_line(
+                &mut lines,
+                "Use Up/Down and Enter to select a user turn. Esc closes.".to_string(),
+                theme.muted_style(),
+                width,
+            );
+            for (index, item) in selector.items.iter().enumerate() {
+                let marker = if index == selector.selected {
+                    BLACK_CIRCLE
+                } else {
+                    " "
+                };
+                let mut text = format!("{} {}", marker, item.preview);
+                if item.has_file_changes {
+                    text.push_str("  [files]");
+                }
+                push_wrapped_line(
+                    &mut lines,
+                    text,
+                    Style::default().fg(if index == selector.selected {
+                        theme.text
+                    } else {
+                        theme.muted
+                    }),
+                    width,
+                );
+            }
         }
         lines.push(ChatRenderLine::empty());
     }
@@ -2156,6 +2650,32 @@ fn render_prompt(
                 theme.muted_style(),
             )),
         ]
+    } else if state
+        .message_selector
+        .as_ref()
+        .is_some_and(|selector| selector.confirmation.is_some())
+    {
+        vec![
+            Line::from(Span::styled(
+                "Rewind confirmation open. Enter confirms; Esc cancels.",
+                theme.muted_style(),
+            )),
+            Line::from(Span::styled(
+                "Chat input is paused until the rewind decision is handled.",
+                theme.muted_style(),
+            )),
+        ]
+    } else if state.message_selector.is_some() {
+        vec![
+            Line::from(Span::styled(
+                "Message picker open. Select a user turn with Up/Down and Enter.",
+                theme.muted_style(),
+            )),
+            Line::from(Span::styled(
+                "Chat input is paused until the picker is closed.",
+                theme.muted_style(),
+            )),
+        ]
     } else if state.permissions_view.is_some() {
         vec![
             Line::from(Span::styled(
@@ -2386,6 +2906,64 @@ fn format_task_progress_status(status: crate::agents_runtime::AgentTaskStatus) -
     }
 }
 
+fn format_file_rewind_summary(result: &crate::file_history::FileRewindResult) -> String {
+    match (
+        result.restored_files.is_empty(),
+        result.deleted_files.is_empty(),
+    ) {
+        (true, true) => "No tracked file changes needed to be rewound.".to_string(),
+        (false, true) => format!("Rewound files: {}", result.restored_files.join(", ")),
+        (true, false) => format!(
+            "Deleted files created after target: {}",
+            result.deleted_files.join(", ")
+        ),
+        (false, false) => format!(
+            "Rewound files: {}. Deleted new files: {}",
+            result.restored_files.join(", "),
+            result.deleted_files.join(", ")
+        ),
+    }
+}
+
+fn resolve_user_message_id(session: &crate::session::Session, raw: &str) -> anyhow::Result<String> {
+    let trimmed = raw.trim();
+    if matches!(trimmed, "last-user" | "latest-user") {
+        return session
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role.eq_ignore_ascii_case("user"))
+            .map(|message| message.id.clone())
+            .ok_or_else(|| anyhow::anyhow!("No user messages available in this session"));
+    }
+    let mut exact_match = None;
+    let mut prefix_matches = Vec::new();
+    for message in session
+        .messages
+        .iter()
+        .filter(|message| message.role.eq_ignore_ascii_case("user"))
+    {
+        if message.id == trimmed {
+            exact_match = Some(message.id.clone());
+            break;
+        }
+        if message.id.starts_with(trimmed) {
+            prefix_matches.push(message.id.clone());
+        }
+    }
+    if let Some(exact_match) = exact_match {
+        return Ok(exact_match);
+    }
+    match prefix_matches.len() {
+        1 => Ok(prefix_matches.remove(0)),
+        0 => Err(anyhow::anyhow!(
+            "No user message found for id or prefix: {}",
+            trimmed
+        )),
+        _ => Err(anyhow::anyhow!("Message prefix is ambiguous: {}", trimmed)),
+    }
+}
+
 fn render_resume_session_line(
     session: &SessionInfo,
     selected: bool,
@@ -2393,6 +2971,11 @@ fn render_resume_session_line(
 ) -> Line<'static> {
     let marker = if selected { BLACK_CIRCLE } else { " " };
     let status = format!("{:?}", session.status).to_ascii_lowercase();
+    let kind = match session.session_kind {
+        SessionKind::Primary => "primary",
+        SessionKind::Forked => "forked",
+        SessionKind::ChildAgent => "child",
+    };
     Line::from(vec![
         Span::styled(
             format!("{} ", marker),
@@ -2402,8 +2985,44 @@ fn render_resume_session_line(
         Span::styled("  ", theme.muted_style()),
         Span::styled(session.id.clone(), theme.muted_style()),
         Span::styled("  ", theme.muted_style()),
+        Span::styled(kind, Style::default().fg(theme.subtle)),
+        Span::styled("  ", theme.muted_style()),
         Span::styled(status, Style::default().fg(theme.subtle)),
+        Span::styled(
+            session
+                .forked_from_session_id
+                .as_deref()
+                .map(|id| format!("  from {}", short_message_id(id)))
+                .unwrap_or_default(),
+            theme.muted_style(),
+        ),
+        Span::styled(
+            session
+                .spawned_by_task_id
+                .as_deref()
+                .map(|id| format!("  task {}", short_task_id(id)))
+                .unwrap_or_default(),
+            theme.muted_style(),
+        ),
     ])
+}
+
+fn summarize_selector_preview(content: &str) -> String {
+    let normalized = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    let preview = normalized.chars().take(80).collect::<String>();
+    if normalized.chars().count() <= 80 {
+        normalized
+    } else {
+        format!("{}...", preview)
+    }
+}
+
+fn short_message_id(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
+fn short_task_id(id: &str) -> String {
+    id.chars().take(8).collect()
 }
 
 fn render_permissions_view_lines(

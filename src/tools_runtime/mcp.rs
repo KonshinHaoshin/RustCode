@@ -121,6 +121,7 @@ impl McpToolExecutor {
             name: call.name.clone(),
             content,
             is_error,
+            metadata: std::collections::HashMap::new(),
         }
     }
 }
@@ -148,6 +149,7 @@ impl ToolExecutor for McpToolExecutor {
                 name: call.name.clone(),
                 content: format!("Not an MCP tool: {}", call.name),
                 is_error: true,
+                metadata: std::collections::HashMap::new(),
             };
         };
 
@@ -159,6 +161,7 @@ impl ToolExecutor for McpToolExecutor {
                 name: call.name.clone(),
                 content: error.to_string(),
                 is_error: true,
+                metadata: std::collections::HashMap::new(),
             },
         }
     }
