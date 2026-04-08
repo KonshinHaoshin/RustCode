@@ -30,25 +30,41 @@ Replace the old egui GUI path with a Tauri desktop shell backed by a React/Vite 
 - Initial desktop UI supports onboarding gating, settings editing, session restore, transcript display, prompt submission, and approval resume.
 - Added a placeholder Windows icon so `tauri-build` can generate the Windows resource file.
 - Frontend package scripts now target `../src-tauri/tauri.conf.json`, matching the repo layout instead of assuming `src-tauri/` lives under `gui/`.
+- Desktop bridge now includes:
+  - `create_session`
+  - `delete_session`
+  - `list_user_turn_targets`
+  - `preview_rewind`
+  - `rewind_session`
+  - `branch_session`
+  - `list_active_tasks`
+  - `open_project_folder`
+  - `choose_working_directory`
+- The React/Tauri shell has been redesigned to a minimal light desktop UI with:
+  - left rail navigation
+  - session list with delete affordance
+  - home / thread / settings / automation views
+  - floating bottom composer
+  - structured markdown rendering for assistant messages
+  - inline approval and rewind preview cards
+- Desktop workspace handling is no longer fixed to the repo root; the UI can now select a workspace directory and switch subsequent session, task, file-history, and chat context to that directory.
+- Window defaults were reduced to a smaller initial size for a less oversized first launch.
 
 ## In Progress
 
-- Replace the current plain transcript rendering with richer Claude-style structured markdown rendering.
-- Expand the desktop session control surface beyond restore/continue into branch, rewind preview, and rewind execution.
-- Improve tool and approval UX so intermediate tool states are represented as first-class cards instead of generic activity rows.
-- Run the desktop shell through full `tauri dev` smoke testing and fix any runtime integration gaps.
+- Improve the naming and polish of desktop actions so workspace selection, reveal-in-folder, rewind/restore, and task surfaces read clearly without internal terminology leaking into the UI.
+- Resolve the remaining `tauri dev` Windows process-lock friction during hot reload (`rustcode-tauri.exe` access denied when an old process is still alive).
 
 ## Remaining
 
-- Add desktop commands for branch / rewind / task inspection.
-- Surface `turn_failed` and related error events so interrupted turns do not silently collapse into a generic error banner.
+- Decide whether to keep separate `Reveal` / `Select workspace` actions or collapse them into one tighter workspace picker flow.
 - Align desktop transcript behavior with TUI compact/session metadata, including fork lineage and compact boundaries.
 - Decide when to fully remove or archive the old `src/gui/` code.
 - Update public docs and install guidance so Tauri becomes the official GUI story.
 
 ## Risks / Blockers
 
-- The current environment can build both Rust and frontend artifacts, but a real `tauri dev` GUI smoke pass still depends on local desktop/runtime availability.
+- The current environment can build both Rust and frontend artifacts, but repeat `tauri dev` smoke passes on Windows can fail if a previous `rustcode-tauri.exe` is still locking the binary.
 - Existing repo worktree already contains large unrelated in-flight changes; desktop migration work must avoid overwriting those integrations.
 - Desktop DTOs and event names are now frontend contracts, so future changes need append-only evolution to avoid breaking the UI.
 
@@ -59,6 +75,7 @@ Replace the old egui GUI path with a Tauri desktop shell backed by a React/Vite 
 - `cargo check -p rustcode-tauri`
 - `pnpm install` in `gui/`
 - `pnpm run build` in `gui/`
+- `pnpm run tauri:dev` smoke pass reached desktop launch, with one follow-up Windows file-lock failure during hot reload when an old process remained alive.
 
 ## Exit Criteria
 

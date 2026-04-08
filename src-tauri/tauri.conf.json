@@ -4,20 +4,20 @@
   "version": "0.1.0",
   "identifier": "com.konshinhaoshin.rustcode",
   "build": {
-    "beforeDevCommand": "pnpm --dir ../gui dev --host 127.0.0.1 --port 1420",
-    "beforeBuildCommand": "pnpm --dir ../gui build",
+    "beforeDevCommand": "pnpm --dir ./gui dev --host 127.0.0.1 --port 1420",
+    "beforeBuildCommand": "pnpm --dir ./gui build",
     "devUrl": "http://127.0.0.1:1420",
-    "frontendDist": "../gui/dist"
+    "frontendDist": "./gui/dist"
   },
   "app": {
     "withGlobalTauri": false,
     "windows": [
       {
         "title": "RustCode",
-        "width": 1480,
-        "height": 980,
-        "minWidth": 1100,
-        "minHeight": 720,
+        "width": 1280,
+        "height": 860,
+        "minWidth": 960,
+        "minHeight": 680,
         "resizable": true
       }
     ],

@@ -17,4 +17,5 @@ serde_json = "1.0"
 tauri = { version = "2", features = [] }
 tokio = { version = "1.37", features = ["sync"] }
 uuid = { version = "1.8", features = ["v4", "serde"] }
+rfd = "0.14"
 rustcode = { path = "..", default-features = false, features = ["i18n"] }

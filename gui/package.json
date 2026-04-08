@@ -7,8 +7,8 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "tauri:dev": "tauri dev -c ../src-tauri/tauri.conf.json",
-    "tauri:build": "tauri build -c ../src-tauri/tauri.conf.json"
+    "tauri:dev": "powershell -Command \"Set-Location ../src-tauri; ../gui/node_modules/.bin/tauri.CMD dev\"",
+    "tauri:build": "powershell -Command \"Set-Location ../src-tauri; ../gui/node_modules/.bin/tauri.CMD build\""
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

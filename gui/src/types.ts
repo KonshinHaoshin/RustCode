@@ -31,6 +31,31 @@ export type TranscriptMessage = {
   timestamp: string;
 };
 
+export type TurnTarget = {
+  messageId: string;
+  shortId: string;
+  contentPreview: string;
+  timestamp: string;
+  hasTrackedFiles: boolean;
+};
+
+export type RewindPreview = {
+  messageId: string;
+  restoredInput: string;
+  modifiedFiles: string[];
+  deletedFiles: string[];
+  warnings: string[];
+};
+
+export type TaskSummary = {
+  id: string;
+  title: string;
+  status: string;
+  agentName: string;
+  updatedAt: string;
+  summary: string;
+};
+
 export type PendingApproval = {
   toolCallId: string;
   toolName: string;
@@ -39,6 +64,8 @@ export type PendingApproval = {
 };
 
 export type BootstrapPayload = {
+  projectName: string;
+  projectPath: string;
   settings: Settings;
   shouldRunOnboarding: boolean;
   sessions: SessionSummary[];
@@ -60,6 +87,7 @@ export type StreamPayload = {
   sessionId: string;
   delta?: string;
   target?: string;
+  error?: string;
   pendingApproval?: PendingApproval;
   toolCall?: { id: string; name: string; arguments: unknown };
   toolResult?: { name: string; content: string; is_error?: boolean };
