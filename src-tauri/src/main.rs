@@ -1,3 +1,3 @@
 fn main() {
-    rustcode_tauri::run();
+    rustcode_tauri_lib::run();
 }

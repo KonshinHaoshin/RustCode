@@ -49,11 +49,14 @@ Replace the old egui GUI path with a Tauri desktop shell backed by a React/Vite 
   - inline approval and rewind preview cards
 - Desktop workspace handling is no longer fixed to the repo root; the UI can now select a workspace directory and switch subsequent session, task, file-history, and chat context to that directory.
 - Window defaults were reduced to a smaller initial size for a less oversized first launch.
+- The desktop dev loop now mitigates common Windows restart friction by:
+  - renaming the Tauri library target to avoid bin/lib PDB filename collisions
+  - routing `gui` `tauri:dev` through a small PowerShell wrapper that stops stale `rustcode-tauri` processes before relaunch
 
 ## In Progress
 
 - Improve the naming and polish of desktop actions so workspace selection, reveal-in-folder, rewind/restore, and task surfaces read clearly without internal terminology leaking into the UI.
-- Resolve the remaining `tauri dev` Windows process-lock friction during hot reload (`rustcode-tauri.exe` access denied when an old process is still alive).
+- Keep an eye on `tauri dev` on Windows for any remaining binary-lock edge cases beyond the current stale-process cleanup script.
 
 ## Remaining
 

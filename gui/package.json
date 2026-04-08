@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "tauri:dev": "powershell -Command \"Set-Location ../src-tauri; ../gui/node_modules/.bin/tauri.CMD dev\"",
+    "tauri:dev": "powershell -ExecutionPolicy Bypass -File ./scripts/tauri-dev.ps1",
     "tauri:build": "powershell -Command \"Set-Location ../src-tauri; ../gui/node_modules/.bin/tauri.CMD build\""
   },
   "dependencies": {
