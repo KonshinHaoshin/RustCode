@@ -242,7 +242,82 @@ pub fn global_config_dir() -> PathBuf {
 }
 
 pub fn global_settings_path() -> PathBuf {
-    global_config_dir().join("settings.json")
+    active_profile_settings_path().unwrap_or_else(|_| global_config_dir().join("settings.json"))
+}
+
+pub fn profiles_dir() -> PathBuf {
+    global_config_dir().join("profiles")
+}
+
+pub fn active_profile_path() -> PathBuf {
+    global_config_dir().join("active-profile")
+}
+
+pub fn profile_settings_path(profile: &str) -> PathBuf {
+    profiles_dir().join(format!("{}.json", sanitize_profile_name(profile)))
+}
+
+pub fn active_profile_name() -> anyhow::Result<String> {
+    let path = active_profile_path();
+    if path.exists() {
+        let name = std::fs::read_to_string(path)?.trim().to_string();
+        if !name.is_empty() {
+            return Ok(sanitize_profile_name(&name));
+        }
+    }
+    Ok("default".to_string())
+}
+
+pub fn active_profile_settings_path() -> anyhow::Result<PathBuf> {
+    Ok(profile_settings_path(&active_profile_name()?))
+}
+
+pub fn set_active_profile(profile: &str) -> anyhow::Result<()> {
+    let profile = sanitize_profile_name(profile);
+    std::fs::create_dir_all(profiles_dir())?;
+    let target = profile_settings_path(&profile);
+    if !target.exists() {
+        if global_config_dir().join("settings.json").exists() && profile == "default" {
+            std::fs::copy(global_config_dir().join("settings.json"), &target)?;
+        } else {
+            Settings::default().save_to_path(&target)?;
+        }
+    }
+    std::fs::write(active_profile_path(), &profile)?;
+    Ok(())
+}
+
+pub fn list_profiles() -> anyhow::Result<Vec<String>> {
+    let mut profiles = Vec::new();
+    let dir = profiles_dir();
+    if dir.exists() {
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            if path.extension().and_then(|value| value.to_str()) == Some("json") {
+                if let Some(name) = path.file_stem().and_then(|value| value.to_str()) {
+                    profiles.push(name.to_string());
+                }
+            }
+        }
+    }
+    if profiles.is_empty() {
+        profiles.push("default".to_string());
+    }
+    profiles.sort();
+    Ok(profiles)
+}
+
+fn sanitize_profile_name(profile: &str) -> String {
+    let sanitized = profile
+        .trim()
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+        .collect::<String>();
+    if sanitized.is_empty() {
+        "default".to_string()
+    } else {
+        sanitized
+    }
 }
 
 pub fn project_root_from(cwd: Option<&Path>) -> Option<PathBuf> {
@@ -292,6 +367,11 @@ impl Settings {
         let settings = if config_path.exists() {
             let content = std::fs::read_to_string(&config_path)?;
             serde_json::from_str(&content)?
+        } else if global_config_dir().join("settings.json").exists() {
+            let content = std::fs::read_to_string(global_config_dir().join("settings.json"))?;
+            let settings: Settings = serde_json::from_str(&content)?;
+            settings.save()?;
+            settings
         } else if legacy_path.exists() {
             let content = std::fs::read_to_string(&legacy_path)?;
             let settings: Settings = serde_json::from_str(&content)?;
@@ -323,10 +403,22 @@ impl Settings {
         let config_dir = global_config_dir();
         std::fs::create_dir_all(&config_dir)?;
 
-        let config_path = config_dir.join("settings.json");
+        let config_path = global_settings_path();
+        if let Some(parent) = config_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let content = serde_json::to_string_pretty(self)?;
         std::fs::write(&config_path, content)?;
 
+        Ok(())
+    }
+
+    pub fn save_to_path(&self, path: &Path) -> anyhow::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let content = serde_json::to_string_pretty(self)?;
+        std::fs::write(path, content)?;
         Ok(())
     }
 

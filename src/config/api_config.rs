@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 pub enum ApiProvider {
     DeepSeek,
     OpenAI,
+    Anthropic,
+    XAI,
+    Gemini,
     DashScope,
     OpenRouter,
     Ollama,
@@ -18,6 +21,9 @@ impl ApiProvider {
         match value.trim().to_ascii_lowercase().as_str() {
             "deepseek" => Some(Self::DeepSeek),
             "openai" => Some(Self::OpenAI),
+            "anthropic" | "claude" => Some(Self::Anthropic),
+            "xai" | "grok" => Some(Self::XAI),
+            "gemini" | "google" => Some(Self::Gemini),
             "dashscope" | "qwen" => Some(Self::DashScope),
             "openrouter" => Some(Self::OpenRouter),
             "ollama" => Some(Self::Ollama),
@@ -30,6 +36,9 @@ impl ApiProvider {
         match self {
             Self::DeepSeek => "deepseek",
             Self::OpenAI => "openai",
+            Self::Anthropic => "anthropic",
+            Self::XAI => "xai",
+            Self::Gemini => "gemini",
             Self::DashScope => "dashscope",
             Self::OpenRouter => "openrouter",
             Self::Ollama => "ollama",
@@ -41,6 +50,9 @@ impl ApiProvider {
         match self {
             Self::DeepSeek => "https://api.deepseek.com",
             Self::OpenAI => "https://api.openai.com",
+            Self::Anthropic => "https://api.anthropic.com",
+            Self::XAI => "https://api.x.ai",
+            Self::Gemini => "https://generativelanguage.googleapis.com/v1beta/openai",
             Self::DashScope => "https://dashscope.aliyuncs.com/compatible-mode",
             Self::OpenRouter => "https://openrouter.ai/api",
             Self::Ollama => "http://127.0.0.1:11434",
@@ -52,6 +64,9 @@ impl ApiProvider {
         match self {
             Self::DeepSeek => "deepseek-chat",
             Self::OpenAI => "gpt-4.1-mini",
+            Self::Anthropic => "claude-3-5-sonnet-20241022",
+            Self::XAI => "grok-4-1-fast-non-reasoning",
+            Self::Gemini => "gemini-2.5-pro",
             Self::DashScope => "qwen-plus",
             Self::OpenRouter => "openai/gpt-4.1-mini",
             Self::Ollama => "llama3.1",
@@ -61,7 +76,7 @@ impl ApiProvider {
 
     pub fn default_protocol(&self) -> ApiProtocol {
         match self {
-            Self::Custom => ApiProtocol::OpenAi,
+            Self::Anthropic => ApiProtocol::Anthropic,
             _ => ApiProtocol::OpenAi,
         }
     }

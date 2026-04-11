@@ -209,6 +209,22 @@ impl Cli {
             super::ConfigCommands::Onboard => {
                 crate::cli::onboarding::run_config_onboarding()?;
             }
+            super::ConfigCommands::Profile { action } => match action {
+                super::ConfigProfileCommands::List => {
+                    let active = crate::config::active_profile_name()?;
+                    for profile in crate::config::list_profiles()? {
+                        let marker = if profile == active { "*" } else { " " };
+                        println!("{} {}", marker, profile);
+                    }
+                }
+                super::ConfigProfileCommands::Show => {
+                    println!("{}", crate::config::active_profile_name()?);
+                }
+                super::ConfigProfileCommands::Use { name } => {
+                    crate::config::set_active_profile(name)?;
+                    println!("Active profile: {}", crate::config::active_profile_name()?);
+                }
+            },
             super::ConfigCommands::Set { key, value } => {
                 crate::config::Settings::set(key, value)?;
                 println!("Set {} = {}", key, value);

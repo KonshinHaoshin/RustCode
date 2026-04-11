@@ -175,8 +175,27 @@ pub enum ConfigCommands {
     /// Launch an interactive onboarding flow for model configuration
     Onboard,
 
+    /// Manage named configuration profiles
+    Profile {
+        #[command(subcommand)]
+        action: ConfigProfileCommands,
+    },
+
     /// Reset configuration to defaults
     Reset,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ConfigProfileCommands {
+    /// List available profiles
+    List,
+    /// Show the active profile name
+    Show,
+    /// Switch to a profile, creating it if missing
+    Use {
+        /// Profile name, such as 1 or 2
+        name: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]

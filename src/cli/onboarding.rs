@@ -169,6 +169,9 @@ fn prompt_provider(label: &str, default: ApiProvider) -> anyhow::Result<ApiProvi
     let providers = [
         ApiProvider::DeepSeek,
         ApiProvider::OpenAI,
+        ApiProvider::Anthropic,
+        ApiProvider::XAI,
+        ApiProvider::Gemini,
         ApiProvider::DashScope,
         ApiProvider::OpenRouter,
         ApiProvider::Ollama,
