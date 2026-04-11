@@ -77,6 +77,10 @@ fn parse_native_command(command: &str, args: &str) -> LocalCommand {
 
 fn format_prompt_command(command: &str, args: &str) -> String {
     match command {
+        "init" => format!(
+            "Please analyze this repository and create or update a concise `rustcode.md` file at the workspace root.\n\nWhat to do:\n1. Inspect the repository before writing: read manifest files, README files, AGENTS.md, existing rustcode.md or CLAUDE.md, package/build configs, and obvious test/lint configuration.\n2. Identify the commands future RustCode sessions need: build, check, lint, test, and how to run focused tests. Do not invent commands you cannot infer.\n3. Summarize high-level architecture and non-obvious workflow rules. Avoid listing every file or generic best practices.\n4. Write the result to `rustcode.md`, not CLAUDE.md. If `rustcode.md` exists, update it instead of duplicating sections.\n5. Keep it concise and repository-specific.\n\nUser notes for this init run: {}",
+            empty_as_default(args, "none")
+        ),
         "review" => format!(
             "Review this codebase or change with a code-review mindset. Prioritize correctness, regressions, security risks, and missing tests. Scope: {}",
             empty_as_default(args, "current workspace or diff")
@@ -137,14 +141,10 @@ mod tests {
     }
 
     #[test]
-    fn parses_init_flags() {
-        assert_eq!(
-            parse_slash_command("/init --force"),
-            Some(LocalCommand::Init {
-                force: true,
-                append: false,
-            })
-        );
+    fn init_is_prompt_backed() {
+        let temp = tempfile::tempdir().unwrap();
+        let processed = process_slash_input("/init", temp.path());
+        assert!(matches!(processed, Some(ProcessedInput::Prompt(prompt)) if prompt.contains("rustcode.md")));
     }
 
     #[test]

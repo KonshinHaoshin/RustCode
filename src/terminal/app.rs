@@ -25,7 +25,11 @@ use crate::{
         ProjectPermissionRuleKind, Settings,
     },
     file_history::FileHistoryStore,
-    input::commands::init::{run_init, InitMode},
+    input::commands::{
+        init::{run_init, InitMode},
+        registry::SlashCommandRegistry,
+        spec::SlashCommandSpec,
+    },
     input::{format_help_text, format_status_text, InputProcessor, LocalCommand, ProcessedInput},
     onboarding::OnboardingDraft,
     permissions::events::{PermissionEvent, PermissionEventStore},
@@ -58,6 +62,8 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+const MAX_SLASH_MENU_ITEMS: usize = 8;
 
 pub struct TerminalApp {
     terminal: Terminal<CrosstermBackend<Stdout>>,
@@ -289,6 +295,24 @@ impl TerminalApp {
         }
 
         match key.code {
+            KeyCode::Up if self.state.slash_menu_visible => {
+                let commands = matching_slash_commands(&self.state.input);
+                if !commands.is_empty() {
+                    self.state.slash_menu_selected = self.state.slash_menu_selected.saturating_sub(1);
+                    return true;
+                }
+                false
+            }
+            KeyCode::Down if self.state.slash_menu_visible => {
+                let commands = matching_slash_commands(&self.state.input);
+                if !commands.is_empty()
+                    && self.state.slash_menu_selected + 1 < commands.len().min(MAX_SLASH_MENU_ITEMS)
+                {
+                    self.state.slash_menu_selected += 1;
+                    return true;
+                }
+                !commands.is_empty()
+            }
             KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.state.transcript_mode = match self.state.transcript_mode {
                     TranscriptViewMode::Main => TranscriptViewMode::Transcript,
@@ -379,8 +403,15 @@ impl TerminalApp {
                 self.state.scroll_offset != old_offset
             }
             KeyCode::Enter => {
+                if self.state.slash_menu_visible {
+                    let commands = matching_slash_commands(&self.state.input);
+                    if self.state.apply_selected_slash_command(&commands) {
+                        return true;
+                    }
+                }
                 if key.modifiers.contains(KeyModifiers::SHIFT) {
                     self.state.input.push('\n');
+                    self.state.refresh_slash_menu();
                     true
                 } else {
                     self.submit_prompt()
@@ -389,9 +420,14 @@ impl TerminalApp {
             KeyCode::Backspace => {
                 let had_input = !self.state.input.is_empty();
                 self.state.input.pop();
+                self.state.refresh_slash_menu();
                 had_input
             }
             KeyCode::Tab => {
+                let commands = matching_slash_commands(&self.state.input);
+                if self.state.apply_selected_slash_command(&commands) {
+                    return true;
+                }
                 self.state.view = ViewMode::Onboarding;
                 self.state.onboarding_step = OnboardingStep::Summary;
                 self.state.status = "Opened configuration summary.".to_string();
@@ -413,10 +449,12 @@ impl TerminalApp {
                 }
                 let had_input = !self.state.input.is_empty();
                 self.state.input.clear();
+                self.state.refresh_slash_menu();
                 had_input
             }
             KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.state.input.push(ch);
+                self.state.refresh_slash_menu();
                 true
             }
             _ => false,
@@ -2900,7 +2938,7 @@ fn render_prompt(
             )),
         ]
     } else {
-        state
+        let mut rendered = state
             .input
             .lines()
             .map(|line| {
@@ -2909,7 +2947,36 @@ fn render_prompt(
                     Style::default().fg(theme.text),
                 ))
             })
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        if state.slash_menu_visible {
+            let commands = matching_slash_commands(&state.input);
+            if !commands.is_empty() {
+                rendered.push(Line::default());
+                rendered.push(Line::from(Span::styled(
+                    "Slash commands",
+                    Style::default()
+                        .fg(theme.brand)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                for (index, command) in commands.iter().take(MAX_SLASH_MENU_ITEMS).enumerate() {
+                    let selected = index == state.slash_menu_selected;
+                    let prefix = if selected { "> " } else { "  " };
+                    let style = if selected {
+                        Style::default().fg(theme.panel).bg(theme.brand)
+                    } else {
+                        theme.muted_style()
+                    };
+                    rendered.push(Line::from(vec![
+                        Span::styled(format!("{}{}", prefix, format_command_label(command)), style),
+                    ]));
+                    rendered.push(Line::from(Span::styled(
+                        format!("    {}", command.description),
+                        if selected { Style::default().fg(theme.text) } else { theme.muted_style() },
+                    )));
+                }
+            }
+        }
+        rendered
     };
 
     if !state.active_tasks.is_empty() && state.pending_approval.is_none() {
@@ -2958,6 +3025,31 @@ fn render_prompt(
             .wrap(ratatui::widgets::Wrap { trim: false }),
         area,
     );
+}
+
+fn matching_slash_commands(input: &str) -> Vec<SlashCommandSpec> {
+    let trimmed = input.trim_start();
+    let Some(rest) = trimmed.strip_prefix('/') else {
+        return Vec::new();
+    };
+    if rest.contains(char::is_whitespace) && !rest.ends_with(' ') {
+        return Vec::new();
+    }
+    let query = rest.split_whitespace().next().unwrap_or_default().to_ascii_lowercase();
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    SlashCommandRegistry::load(&cwd)
+        .all()
+        .iter()
+        .filter(|command| query.is_empty() || command.name.starts_with(&query))
+        .cloned()
+        .collect()
+}
+
+fn format_command_label(command: &SlashCommandSpec) -> String {
+    match &command.argument_hint {
+        Some(hint) => format!("/{} {}", command.name, hint),
+        None => format!("/{}", command.name),
+    }
 }
 
 fn render_approval_buttons(focus_index: usize, theme: TerminalTheme) -> Vec<Span<'static>> {

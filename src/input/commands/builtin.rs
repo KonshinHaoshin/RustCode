@@ -9,11 +9,10 @@ pub fn builtin_command_specs() -> Vec<SlashCommandSpec> {
             None,
             &[],
         ),
-        native(
+        prompt(
             "init",
-            "Create or update rustcode.md for the current workspace",
-            Some("[--force|--append]"),
-            &[],
+            "Analyze this codebase and create or update rustcode.md",
+            None,
         ),
         native(
             "branch",

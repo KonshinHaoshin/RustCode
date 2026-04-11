@@ -1,6 +1,7 @@
 use crate::{
     agents_runtime::AgentTaskStatus,
     config::{ApiProvider, FallbackTarget, ProjectLocalPermissions, Settings},
+    input::commands::spec::SlashCommandSpec,
     onboarding::OnboardingDraft,
     permissions::{events::PermissionEvent, PermissionsSettings},
     runtime::{PendingApproval, QueryProgressEvent, QueryTurnResult, RuntimeMessage, RuntimeRole},
@@ -285,6 +286,8 @@ pub struct TerminalState {
     pub active_tasks: Vec<TaskProgressItem>,
     pub last_copy_status: Option<String>,
     pub selection_copied_at: Option<Instant>,
+    pub slash_menu_visible: bool,
+    pub slash_menu_selected: usize,
 }
 
 impl TerminalState {
@@ -402,7 +405,30 @@ impl TerminalState {
             active_tasks: Vec::new(),
             last_copy_status: None,
             selection_copied_at: None,
+            slash_menu_visible: false,
+            slash_menu_selected: 0,
         }
+    }
+
+    pub fn refresh_slash_menu(&mut self) {
+        let trimmed = self.input.trim_start();
+        if !trimmed.starts_with('/') || trimmed.contains('\n') {
+            self.slash_menu_visible = false;
+            self.slash_menu_selected = 0;
+            return;
+        }
+        self.slash_menu_visible = true;
+    }
+
+    pub fn apply_selected_slash_command(&mut self, commands: &[SlashCommandSpec]) -> bool {
+        if !self.slash_menu_visible || commands.is_empty() {
+            return false;
+        }
+        let index = self.slash_menu_selected.min(commands.len().saturating_sub(1));
+        self.input = format!("/{} ", commands[index].name);
+        self.slash_menu_visible = false;
+        self.slash_menu_selected = 0;
+        true
     }
 
     pub fn consume_initial_prompt(&mut self) -> Option<String> {
