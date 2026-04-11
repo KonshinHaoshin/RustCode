@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 const COMPACT_SUMMARY_PREFIX: &str = "Previous conversation compacted into summary:\n";
+const MICRO_COMPACT_SUMMARY_PREFIX: &str = "Previous conversation micro-compacted into summary:\n";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RuntimeRole {
@@ -95,8 +96,18 @@ impl RuntimeMessage {
         Self::system(format!("{}{}", COMPACT_SUMMARY_PREFIX, summary.into()))
     }
 
+    pub fn micro_compact_summary(summary: impl Into<String>) -> Self {
+        Self::system(format!(
+            "{}{}",
+            MICRO_COMPACT_SUMMARY_PREFIX,
+            summary.into()
+        ))
+    }
+
     pub fn is_compact_summary(&self) -> bool {
-        self.role == RuntimeRole::System && self.content.starts_with(COMPACT_SUMMARY_PREFIX)
+        self.role == RuntimeRole::System
+            && (self.content.starts_with(COMPACT_SUMMARY_PREFIX)
+                || self.content.starts_with(MICRO_COMPACT_SUMMARY_PREFIX))
     }
 
     pub fn has_tool_calls(&self) -> bool {

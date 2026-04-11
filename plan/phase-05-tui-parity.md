@@ -2,32 +2,37 @@
 
 ## Goal
 
-将当前 TUI 升级为接近 Claude Code 的 transcript-first agent frontend。
+Bring the TUI closer to a Claude Code style transcript-first frontend on top of the unified runtime.
 
 ## Completed
 
-- 恢复聊天区滚轮滚动，不再被选择逻辑吞掉
-- TUI worker 改为消费 runtime 进度事件，而不是仅等待最终 turn 结果
-- 执行中可见 tool request / tool result 进度行
-- OpenAI-style 纯文本回复会增量刷入 transcript，而不是完成后一口气展示
-- Anthropic-style `text_delta` / `thinking_delta` / `tool_use` SSE 事件已接入
-- OpenAI-style 带 `tool_calls` 的 streaming delta 已接入，可在工具回合中继续增量输出正文
-- assistant transcript 现已按 markdown 渲染，支持标题、列表、引用、代码块、表格和行内样式
-- TUI transcript 行模型已升级为富文本 spans，同时保持复制选择依赖的 plain text 映射
-- markdown 渲染加入了内容缓存和窄终端表格自动降级
+- Restored mouse-wheel transcript scrolling after earlier copy-mode regressions.
+- Switched the TUI worker to consume runtime progress events instead of waiting only for final turn completion.
+- Added streaming assistant text updates for OpenAI-style responses so transcript text appears incrementally.
+- Added Anthropic SSE support for text, thinking, and tool-use streaming events.
+- Added OpenAI-style streamed tool-call delta handling so tool-enabled turns can keep rendering incrementally.
+- Upgraded assistant transcript rendering to a markdown-aware pipeline with headings, lists, quotes, code blocks, and table fallback.
+- Preserved styled spans for transcript rendering while keeping plain-text mapping for selection and copy behavior.
+- Added markdown content caching and narrow-terminal table degradation.
+- Refined approval cards with origin-aware context, bounded argument previews, and tool risk/summary metadata.
+- Refined transcript scrollback so manual scroll and auto-follow are distinct, oversized offsets are clamped, and streaming updates respect the user's current position.
+- Refined copy/selection behavior so `Ctrl+C` copies the active selection, copy status is surfaced in the sticky prompt area, and selection clearing behaves predictably.
+- Refined live tool progress so a single in-flight tool row transitions from preparing to final result instead of duplicating transient rows.
 
 ## Remaining
 
-- permission dialogs 继续细化
-- sticky prompt equivalent
-- copy mode 继续细化
-- refined scrollback behavior
-- 更细的 tool-call 构建中间态展示仍可继续打磨
+- None for the current Phase 5 scope.
 
 ## Risks / Blockers
 
-- 需要依赖前几个 phase 的 runtime 事件模型
+- The TUI behavior depends on the runtime event model stabilized in earlier phases.
+- Windows test execution in this environment can still intermittently hit `os error 5` and may require elevated targeted test runs.
+
+## Verification
+
+- `cargo check`
+- targeted unit tests for selection, scrollback, approval labeling, and tool-progress helpers
 
 ## Next
 
-继续补齐更接近 Claude Code 的 transcript/front-end 细节，重点是更完整的流式 markdown 增量优化、权限卡片细化和滚动行为打磨。
+Phase 5 completed. Continue with later phases unless new TUI regressions reopen this scope.

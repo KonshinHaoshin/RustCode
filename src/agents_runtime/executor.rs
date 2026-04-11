@@ -312,7 +312,9 @@ async fn execute_agent_turns(
     }
 
     Err(anyhow::anyhow!(
-        "Agent exceeded max turns without producing a final response"
+        "Agent '{}' exceeded max turns ({}) without producing a final response",
+        agent.name,
+        max_turns
     ))
 }
 
@@ -437,5 +439,59 @@ fn extend_unique(rules: &mut Vec<String>, tool_name: &str) {
         .any(|rule| rule.eq_ignore_ascii_case(tool_name))
     {
         rules.push(tool_name.to_string());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::{QueryTurnResult, RuntimeMessage};
+
+    fn turn(
+        content: &str,
+        finish_reason: Option<&str>,
+        tool_call_count: usize,
+        status: TurnStatus,
+    ) -> QueryTurnResult {
+        QueryTurnResult {
+            history: Vec::new(),
+            assistant_message: Some(RuntimeMessage::assistant(content)),
+            usage: None,
+            model: "test".to_string(),
+            finish_reason: finish_reason.map(str::to_string),
+            tool_call_count,
+            status,
+            pending_approval: None,
+            was_compacted: false,
+            compaction_summary: None,
+        }
+    }
+
+    #[test]
+    fn should_continue_agent_turn_on_length_finish() {
+        let turn = turn("partial", Some("length"), 0, TurnStatus::Completed);
+
+        assert!(should_continue_agent_turn(&turn, 1, 2));
+    }
+
+    #[test]
+    fn should_continue_agent_turn_after_empty_tool_turn() {
+        let turn = turn("", None, 1, TurnStatus::Completed);
+
+        assert!(should_continue_agent_turn(&turn, 1, 2));
+    }
+
+    #[test]
+    fn should_not_continue_when_max_turns_used() {
+        let turn = turn("", None, 1, TurnStatus::Completed);
+
+        assert!(!should_continue_agent_turn(&turn, 2, 2));
+    }
+
+    #[test]
+    fn should_not_continue_when_awaiting_approval() {
+        let turn = turn("", Some("length"), 1, TurnStatus::AwaitingApproval);
+
+        assert!(!should_continue_agent_turn(&turn, 1, 3));
     }
 }

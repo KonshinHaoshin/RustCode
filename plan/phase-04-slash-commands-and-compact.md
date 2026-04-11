@@ -48,6 +48,9 @@
   - `compaction_summary`
 - session transcript 现在会把 compact summary 标记为 `CompactBoundary`
 
+- compact now includes reactive pre-turn compaction, micro-compaction, reserved completion budget, and a token-estimate based decision model
+- reactive compact decisions now account for the pending user message before submission, instead of only the already-persisted history
+- `/resume` metadata search now accepts `kind:` filters so compact/session workflows can target primary, forked, or child sessions more directly
 ## Remaining
 
 - Claude Code 级更复杂 compaction（microcompact / reactive compact / session-memory compact）

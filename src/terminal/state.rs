@@ -107,6 +107,8 @@ pub struct PendingApprovalViewModel {
     pub arguments_preview: String,
     pub focus_index: usize,
     pub origin: PendingApprovalOrigin,
+    pub risk_label: Option<String>,
+    pub tool_summary: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,6 +126,7 @@ pub enum PendingApprovalOrigin {
 pub struct ResumePickerState {
     pub sessions: Vec<SessionInfo>,
     pub selected: usize,
+    pub query: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -260,6 +263,7 @@ pub struct TerminalState {
     pub last_tick: Instant,
     pub working_dir: String,
     pub scroll_offset: usize,
+    pub chat_auto_follow: bool,
     pub chat_render_cache: Paragraph<'static>,
     pub chat_render_width: u16,
     pub chat_render_line_count: u16,
@@ -277,7 +281,10 @@ pub struct TerminalState {
     pub last_usage_total: Option<usize>,
     pub live_assistant_message: Option<usize>,
     pub live_thinking_message: Option<usize>,
+    pub live_tool_message: Option<usize>,
     pub active_tasks: Vec<TaskProgressItem>,
+    pub last_copy_status: Option<String>,
+    pub selection_copied_at: Option<Instant>,
 }
 
 impl TerminalState {
@@ -316,6 +323,8 @@ impl TerminalState {
                                 arguments_preview: format_arguments_preview(
                                     &pending.tool_call.arguments,
                                 ),
+                                risk_label: Some(approval_risk_label(&pending.tool_call.name)),
+                                tool_summary: Some(approval_tool_summary(&pending)),
                                 pending,
                                 focus_index: 0,
                                 origin: PendingApprovalOrigin::RestoredSession,
@@ -371,6 +380,7 @@ impl TerminalState {
             last_tick: Instant::now(),
             working_dir,
             scroll_offset: 0,
+            chat_auto_follow: true,
             chat_render_cache: Paragraph::new(Vec::<Line<'static>>::new()),
             chat_render_width: 0,
             chat_render_line_count: 0,
@@ -388,7 +398,10 @@ impl TerminalState {
             last_usage_total: None,
             live_assistant_message: None,
             live_thinking_message: None,
+            live_tool_message: None,
             active_tasks: Vec::new(),
+            last_copy_status: None,
+            selection_copied_at: None,
         }
     }
 
@@ -518,6 +531,7 @@ impl TerminalState {
         self.conversation_history = Arc::new(history);
         self.live_assistant_message = None;
         self.live_thinking_message = None;
+        self.live_tool_message = None;
         self.clear_selection();
         self.refresh_display_messages();
     }
@@ -536,8 +550,10 @@ impl TerminalState {
         self.verbose_transcript = false;
         self.live_assistant_message = None;
         self.live_thinking_message = None;
+        self.live_tool_message = None;
         self.active_tasks.clear();
         self.scroll_offset = 0;
+        self.chat_auto_follow = true;
         self.thinking = false;
         self.clear_selection();
     }
@@ -553,10 +569,13 @@ impl TerminalState {
     ) {
         self.pending_approval = pending.map(|pending| PendingApprovalViewModel {
             arguments_preview: format_arguments_preview(&pending.tool_call.arguments),
+            risk_label: Some(approval_risk_label(&pending.tool_call.name)),
+            tool_summary: Some(approval_tool_summary(&pending)),
             pending,
             focus_index: 0,
             origin,
         });
+        self.live_tool_message = None;
         self.mark_chat_render_dirty();
     }
 
@@ -606,6 +625,8 @@ impl TerminalState {
             .pending_approval
             .map(|pending| PendingApprovalViewModel {
                 arguments_preview: format_arguments_preview(&pending.tool_call.arguments),
+                risk_label: Some(approval_risk_label(&pending.tool_call.name)),
+                tool_summary: Some(approval_tool_summary(&pending)),
                 pending,
                 focus_index: 0,
                 origin: PendingApprovalOrigin::RestoredSession,
@@ -633,6 +654,8 @@ impl TerminalState {
         self.selection = None;
         self.selection_mode = SelectionMode::Char;
         self.selection_dragging = false;
+        self.last_copy_status = None;
+        self.selection_copied_at = None;
     }
 
     pub fn has_selection(&self) -> bool {
@@ -665,6 +688,11 @@ impl TerminalState {
         }
         self.selection_dragging = false;
         self.mark_chat_render_dirty();
+    }
+
+    pub fn mark_selection_copied(&mut self, text: &str) {
+        self.last_copy_status = copy_status_for_text(text);
+        self.selection_copied_at = self.last_copy_status.as_ref().map(|_| Instant::now());
     }
 
     pub fn selection_text(&self) -> Option<String> {
@@ -916,6 +944,36 @@ pub(crate) fn format_arguments_preview(arguments: &serde_json::Value) -> String 
     preview
 }
 
+pub(crate) fn approval_risk_label(tool_name: &str) -> String {
+    let normalized = tool_name.to_ascii_lowercase();
+    if matches!(
+        normalized.as_str(),
+        "execute_command" | "file_write" | "file_edit"
+    ) {
+        "modifies workspace".to_string()
+    } else if matches!(normalized.as_str(), "task_create" | "task_update") {
+        "subagent/task state".to_string()
+    } else if normalized.starts_with("mcp__") {
+        "external tool".to_string()
+    } else {
+        "tool call".to_string()
+    }
+}
+
+pub(crate) fn approval_tool_summary(pending: &PendingApproval) -> String {
+    let preview = format_arguments_preview(&pending.tool_call.arguments);
+    let first_line = preview.lines().next().unwrap_or_default().trim();
+    if first_line.is_empty() {
+        pending.tool_call.name.clone()
+    } else {
+        format!("{}: {}", pending.tool_call.name, first_line)
+    }
+}
+
+pub(crate) fn copy_status_for_text(text: &str) -> Option<String> {
+    (!text.is_empty()).then(|| format!("Copied {} character(s).", text.chars().count()))
+}
+
 pub(crate) fn format_tool_body(content: &str) -> String {
     if content.trim().is_empty() {
         String::new()
@@ -927,6 +985,7 @@ pub(crate) fn format_tool_body(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::RuntimeToolCall;
 
     #[test]
     fn selection_text_collects_multiline_range() {
@@ -955,5 +1014,49 @@ mod tests {
         assert_eq!(state.live_assistant_message, Some(0));
         assert_eq!(state.messages.len(), 1);
         assert_eq!(state.messages[0].content, "hello");
+    }
+
+    #[test]
+    fn approval_risk_label_classifies_mutating_tools() {
+        assert_eq!(approval_risk_label("execute_command"), "modifies workspace");
+        assert_eq!(approval_risk_label("file_edit"), "modifies workspace");
+    }
+
+    #[test]
+    fn approval_risk_label_classifies_task_tools() {
+        assert_eq!(approval_risk_label("task_create"), "subagent/task state");
+        assert_eq!(
+            approval_risk_label("mcp__filesystem__read"),
+            "external tool"
+        );
+    }
+
+    #[test]
+    fn copy_status_counts_selected_characters() {
+        assert_eq!(
+            copy_status_for_text("hello"),
+            Some("Copied 5 character(s).".to_string())
+        );
+    }
+
+    #[test]
+    fn copy_status_ignores_empty_selection() {
+        assert_eq!(copy_status_for_text(""), None);
+    }
+
+    #[test]
+    fn approval_tool_summary_uses_first_preview_line() {
+        let pending = PendingApproval {
+            tool_call: RuntimeToolCall {
+                id: "call-1".to_string(),
+                name: "execute_command".to_string(),
+                arguments: serde_json::json!({"command": "cargo test", "cwd": "."}),
+            },
+            reason: "approval required".to_string(),
+        };
+
+        let summary = approval_tool_summary(&pending);
+        assert!(summary.starts_with("execute_command:"));
+        assert!(summary.contains("command"));
     }
 }

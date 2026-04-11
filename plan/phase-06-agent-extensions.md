@@ -2,34 +2,39 @@
 
 ## Goal
 
-把现有 `services::agents` 从 prompt wrapper 提升为真正的 agent runtime 扩展层。
+Elevate `services::agents` from a prompt wrapper into a real agent-runtime extension layer with child tasks, isolated sessions, and agent-specific execution profiles.
 
 ## Completed
 
-- 子 agent 的最小 task runtime 已落地：`task_create` / `task_list` / `task_get` / `task_update`
-- task store 已持久化到项目 `rustcode/state/tasks/`
-- child agent 现在会创建隔离 session，并在完成后把结果写回 task store
-- TUI 会轮询当前 session 相关的 task 完成/失败通知，并追加到 transcript
+- Landed task-oriented subagent runtime primitives: `task_create`, `task_list`, `task_get`, and `task_update`.
+- Persisted task state under project-local `rustcode/state/tasks/` storage.
+- Spawned child agents into isolated child sessions and wrote results back into the task store.
+- Surfaced task completion and failure notifications back into the parent TUI transcript.
+- Added agent-specific memory loading from `~/.rustcode/agent-memory/` and project-local `rustcode/agent-memory*/` sources.
+- Injected agent preamble, optional memory, parent compact/recent context summary, and stricter task contracts into child execution history.
+- Unified direct `run_agent` and background child-task execution through `agents_runtime::executor`.
+- Normalized background-safe permission behavior so interactive `ask` rules become non-interactive denial for background subagents.
+- Surfaced in-flight child-agent progress in the parent TUI, including queued, running, and awaiting-approval states.
+- Bubbled child-agent permission requests back into the parent TUI as approval cards and resumed approved child tasks from their isolated child sessions.
+- Expanded agent tool execution profiles with per-agent builtin allowlists, task tools, MCP tools, and external MCP tools.
+- Added bounded `max_turns` continuation behavior for empty or truncated completions.
+- Added lineage polish so child contracts and `task_get` expose parent session, child session, pending approval, and max-turn context.
+- Added targeted tests that lock continuation behavior and lineage/task formatting.
 
 ## Remaining
 
-- final Claude-style fork/replay polish if needed
+- None for the current Phase 6 scope.
 
 ## Risks / Blockers
 
-- 需要基于统一 runtime 和 transcript 之上实现
+- Full transcript subtree replay remains out of scope; current replay/restore behavior is lineage-aware rather than a new replay model.
+- Windows test execution in this environment can still intermittently hit `os error 5` and may require elevated targeted test runs.
+
+## Verification
+
+- `cargo check`
+- targeted unit tests for child-task lineage, task detail formatting, and bounded continuation behavior
 
 ## Next
 
-继续补权限冒泡、更接近 Claude 的 fork/subagent replay，以及多轮 subagent execution profile。
-
-## Latest Update
-
-- Phase 6 slice 2 completed: added agent-specific memory loading from `~/.rustcode/agent-memory/` and project-local `rustcode/agent-memory*/`
-- Phase 6 slice 2 completed: child agent execution now injects agent preamble, optional memory, parent compact/recent context summary, and a stricter task contract
-- Phase 6 slice 2 completed: `services::agents::run_agent` and background child tasks now share a unified execution path through `agents_runtime::executor`
-- Phase 6 slice 2 completed: background-safe permission normalization now converts interactive `ask` rules into non-interactive denial for agent runs, preventing stuck background subagents
-- Phase 6 slice 3 completed: TUI now surfaces in-flight child agent progress for the active parent session, showing queued/running subagent summaries before completion notifications arrive
-- Phase 6 slice 4 completed: child-agent permission requests now bubble into the parent TUI as approval cards, and approved child tasks resume from their isolated child sessions instead of failing immediately
-- Phase 6 slice 4 completed: agent definitions now expose richer tool profiles, allowing per-agent control over builtin allowlists plus task tools, MCP tools, and external MCP tools
-- Phase 6 slice 4 completed: subagent execution now honors `max_turns` with a bounded continuation loop for empty / truncated completions, enabling limited multi-turn completion beyond the previous single-turn model
+Phase 6 completed. Later work should move to subsequent phases unless new agent-runtime regressions reopen this area.

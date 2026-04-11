@@ -72,12 +72,16 @@ fn build_agent_preamble(
 pub fn build_child_task_contract(task: &AgentTask, agent: &AgentDefinition) -> String {
     format!(
         "You are running as child agent '{agent_name}' for task {task_id}.\n\
+Parent session: {parent_session}.\n\
+Max turns: {max_turns}.\n\
 Stay strictly within the assigned scope.\n\
 Do not create subagents.\n\
 If blocked by permissions or missing context, report the blocker concisely in your final answer.\n\
 Focus only on the task described by the user message.",
         agent_name = agent.name,
-        task_id = task.id
+        task_id = task.id,
+        parent_session = task.parent_session_id.as_deref().unwrap_or("unknown"),
+        max_turns = agent.max_turns.unwrap_or(1).max(1)
     )
 }
 
@@ -201,5 +205,22 @@ mod tests {
         };
         let history = build_child_history(&[], &task, &test_agent(), None, None).unwrap();
         assert_eq!(history.last().map(|msg| msg.role), Some(RuntimeRole::User));
+    }
+
+    #[test]
+    fn child_task_contract_includes_lineage() {
+        let task = AgentTask {
+            id: "task-1".to_string(),
+            parent_session_id: Some("parent-1".to_string()),
+            ..AgentTask::default()
+        };
+        let mut agent = test_agent();
+        agent.max_turns = Some(3);
+
+        let contract = build_child_task_contract(&task, &agent);
+
+        assert!(contract.contains("task task-1"));
+        assert!(contract.contains("Parent session: parent-1"));
+        assert!(contract.contains("Max turns: 3"));
     }
 }

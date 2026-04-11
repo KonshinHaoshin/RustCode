@@ -50,6 +50,9 @@
 - `/permissions` 现在可以查看 global/local 规则来源，删除 local rule，并把 recent event 提升为 allow/deny/ask
 - `query` / REPL / agent service 遇到 `AwaitingApproval` 时会返回明确提示，而不是假装成功
 
+- permission matching now supports wildcard patterns beyond simple prefix rules, while keeping deny > ask > allow precedence
+- primary sessions can now auto-refresh placeholder names from the first user turn and expose latest user summaries for search/picker previews
+- `/resume <query>` now supports metadata search plus `kind:` filtering for primary/forked/child sessions
 ## Remaining
 
 - 更丰富的规则匹配能力

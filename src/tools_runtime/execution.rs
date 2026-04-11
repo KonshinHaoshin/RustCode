@@ -232,8 +232,15 @@ impl BuiltinToolExecutor {
                     format!("Status: {}", format_task_status(task.status)),
                     format!("Description: {}", task.description),
                 ];
+                if let Some(parent_session_id) = task.parent_session_id {
+                    lines.push(format!("Parent session: {}", parent_session_id));
+                }
                 if let Some(child_session_id) = task.child_session_id {
                     lines.push(format!("Child session: {}", child_session_id));
+                }
+                if let Some(pending) = task.pending_approval {
+                    lines.push(format!("Pending approval tool: {}", pending.tool_call.name));
+                    lines.push(format!("Pending approval reason: {}", pending.reason));
                 }
                 if let Some(summary) = task.result_summary {
                     lines.push(format!("Result: {}", summary));
@@ -447,6 +454,7 @@ impl ToolExecutor for BuiltinToolExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::RuntimeToolCall;
 
     #[tokio::test]
     async fn builtin_profile_can_hide_task_tools() {
@@ -473,5 +481,54 @@ mod tests {
         let definitions = executor.definitions().await;
         assert!(definitions.iter().any(|item| item.name == "task_create"));
         assert!(definitions.iter().any(|item| item.name == "file_read"));
+    }
+
+    #[tokio::test]
+    async fn task_get_formats_pending_approval_tool() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().to_path_buf();
+        let store = AgentTaskStore::for_project(Some(project_root.as_path())).unwrap();
+        let task = store
+            .create(
+                "inspect",
+                "inspect code",
+                "explore",
+                Some("parent-1".to_string()),
+                serde_json::json!({}),
+            )
+            .unwrap();
+        store.attach_child_session(&task.id, "child-1").unwrap();
+        store
+            .mark_awaiting_approval(
+                &task.id,
+                &crate::runtime::PendingApproval {
+                    tool_call: RuntimeToolCall {
+                        id: "call-1".to_string(),
+                        name: "execute_command".to_string(),
+                        arguments: serde_json::json!({"command": "cargo test"}),
+                    },
+                    reason: "approval required".to_string(),
+                },
+            )
+            .unwrap();
+
+        let executor = BuiltinToolExecutor::new(Settings::default(), Some(project_root));
+        let result = executor
+            .execute_task_tool(
+                &RuntimeToolCall {
+                    id: "tool-1".to_string(),
+                    name: "task_get".to_string(),
+                    arguments: serde_json::json!({"task_id": task.id}),
+                },
+                &ToolExecutionContext::default(),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.content.contains("Parent session: parent-1"));
+        assert!(result.content.contains("Child session: child-1"));
+        assert!(result
+            .content
+            .contains("Pending approval tool: execute_command"));
     }
 }

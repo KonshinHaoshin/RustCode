@@ -379,6 +379,12 @@ impl Settings {
             }
             "compact.enabled" => settings.compact.enabled = value.parse().unwrap_or(true),
             "compact.auto_compact" => settings.compact.auto_compact = value.parse().unwrap_or(true),
+            "compact.reactive_compact" => {
+                settings.compact.reactive_compact = value.parse().unwrap_or(true)
+            }
+            "compact.enable_microcompact" => {
+                settings.compact.enable_microcompact = value.parse().unwrap_or(true)
+            }
             "compact.max_turns_before_compact" => {
                 settings.compact.max_turns_before_compact = value.parse().unwrap_or(24)
             }
@@ -387,6 +393,9 @@ impl Settings {
             }
             "compact.preserve_recent_turns" => {
                 settings.compact.preserve_recent_turns = value.parse().unwrap_or(4)
+            }
+            "compact.reserved_completion_budget" => {
+                settings.compact.reserved_completion_budget = value.parse().unwrap_or(4_096)
             }
             "compact.summary_model" => {
                 let trimmed = value.trim();

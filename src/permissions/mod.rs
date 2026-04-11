@@ -48,10 +48,22 @@ impl SettingsPermissionGate {
     }
 
     fn matches_rule(rules: &[String], tool_name: &str) -> bool {
-        rules.iter().any(|rule| {
-            let trimmed = rule.trim();
-            trimmed == "*" || trimmed.eq_ignore_ascii_case(tool_name)
-        })
+        rules.iter().any(|rule| Self::rule_matches(rule, tool_name))
+    }
+
+    fn rule_matches(rule: &str, tool_name: &str) -> bool {
+        let trimmed = rule.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        if trimmed == "*" {
+            return true;
+        }
+
+        let normalized_rule = trimmed.to_ascii_lowercase();
+        let normalized_tool = tool_name.to_ascii_lowercase();
+
+        wildcard_match(&normalized_rule, &normalized_tool)
     }
 
     pub fn denied_tool_result(call: &RuntimeToolCall, content: String) -> RuntimeToolResult {
@@ -100,15 +112,15 @@ impl PermissionGate for SettingsPermissionGate {
             ));
         }
 
-        if Self::matches_rule(&self.settings.allow_tools, &call.name) {
-            return PermissionDecision::Allow;
-        }
-
         if Self::matches_rule(&self.settings.ask_tools, &call.name) {
             return PermissionDecision::Ask(format!(
                 "Tool {} requires explicit approval",
                 call.name
             ));
+        }
+
+        if Self::matches_rule(&self.settings.allow_tools, &call.name) {
+            return PermissionDecision::Allow;
         }
 
         match self.settings.mode {
@@ -121,5 +133,122 @@ impl PermissionGate for SettingsPermissionGate {
                 call.name
             )),
         }
+    }
+}
+
+fn wildcard_match(pattern: &str, candidate: &str) -> bool {
+    if !pattern.contains('*') {
+        return pattern == candidate;
+    }
+
+    let starts_with_wildcard = pattern.starts_with('*');
+    let ends_with_wildcard = pattern.ends_with('*');
+    let parts = pattern
+        .split('*')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+
+    if parts.is_empty() {
+        return true;
+    }
+
+    let mut position = 0usize;
+
+    for (index, part) in parts.iter().enumerate() {
+        let Some(found) = candidate[position..].find(part) else {
+            return false;
+        };
+        let absolute = position + found;
+
+        if index == 0 && !starts_with_wildcard && absolute != 0 {
+            return false;
+        }
+
+        position = absolute + part.len();
+    }
+
+    if !ends_with_wildcard {
+        if let Some(last) = parts.last() {
+            return candidate.ends_with(last);
+        }
+    }
+
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        PermissionDecision, PermissionGate, PermissionMode, PermissionsSettings,
+        SettingsPermissionGate,
+    };
+    use crate::runtime::RuntimeToolCall;
+
+    fn call(name: &str) -> RuntimeToolCall {
+        RuntimeToolCall {
+            id: "call-1".to_string(),
+            name: name.to_string(),
+            arguments: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn supports_global_and_prefix_rules() {
+        let gate = SettingsPermissionGate::new(PermissionsSettings {
+            mode: PermissionMode::DenyAll,
+            allow_tools: vec!["mcp__*".to_string()],
+            deny_tools: vec![],
+            ask_tools: vec![],
+        });
+
+        assert_eq!(
+            gate.evaluate_tool_call(&call("mcp__search")),
+            PermissionDecision::Allow
+        );
+    }
+
+    #[test]
+    fn deny_has_priority_over_ask_and_allow() {
+        let gate = SettingsPermissionGate::new(PermissionsSettings {
+            mode: PermissionMode::AllowAll,
+            allow_tools: vec!["mcp__server__*".to_string()],
+            deny_tools: vec!["mcp__server__read".to_string()],
+            ask_tools: vec!["mcp__server__*".to_string()],
+        });
+
+        match gate.evaluate_tool_call(&call("mcp__server__read")) {
+            PermissionDecision::Deny(reason) => assert!(reason.contains("deny_tools")),
+            other => panic!("expected deny, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ask_has_priority_over_allow() {
+        let gate = SettingsPermissionGate::new(PermissionsSettings {
+            mode: PermissionMode::AllowAll,
+            allow_tools: vec!["file_*".to_string()],
+            deny_tools: vec![],
+            ask_tools: vec!["file_read".to_string()],
+        });
+
+        match gate.evaluate_tool_call(&call("file_read")) {
+            PermissionDecision::Ask(reason) => assert!(reason.contains("explicit approval")),
+            other => panic!("expected ask, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn supports_infix_wildcard_rules() {
+        let gate = SettingsPermissionGate::new(PermissionsSettings {
+            mode: PermissionMode::DenyAll,
+            allow_tools: vec!["mcp__*__read".to_string()],
+            deny_tools: vec![],
+            ask_tools: vec![],
+        });
+
+        assert_eq!(
+            gate.evaluate_tool_call(&call("mcp__filesystem__read")),
+            PermissionDecision::Allow
+        );
     }
 }

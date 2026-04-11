@@ -9,6 +9,15 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+const DEFAULT_PRIMARY_SESSION_NAMES: &[&str] = &["tui-session", "Desktop Session", "New Session"];
+
+#[derive(Debug, Clone, Default)]
+pub struct SessionQuery {
+    pub text: Option<String>,
+    pub kind: Option<SessionKind>,
+    pub limit: Option<usize>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionRestoreState {
     pub history: Vec<RuntimeMessage>,
@@ -73,6 +82,38 @@ impl SessionManager {
 
     pub fn list_recent(&self) -> anyhow::Result<Vec<SessionInfo>> {
         self.list()
+    }
+
+    pub fn search(&self, query: SessionQuery) -> anyhow::Result<Vec<SessionInfo>> {
+        let mut sessions = self.list()?;
+        if let Some(kind) = query.kind {
+            sessions.retain(|session| session.session_kind == kind);
+        }
+
+        if let Some(text) = query
+            .text
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            let needle = text.to_ascii_lowercase();
+            sessions.retain(|session| {
+                session.id.to_ascii_lowercase().starts_with(&needle)
+                    || session.name.to_ascii_lowercase().contains(&needle)
+                    || session
+                        .latest_user_summary
+                        .as_deref()
+                        .map(|summary| summary.to_ascii_lowercase().contains(&needle))
+                        .unwrap_or(false)
+                    || session.session_kind.as_str().contains(&needle)
+            });
+        }
+
+        if let Some(limit) = query.limit {
+            sessions.truncate(limit);
+        }
+
+        Ok(sessions)
     }
 
     pub fn load_latest(&self) -> anyhow::Result<Option<Session>> {
@@ -248,6 +289,11 @@ impl SessionManager {
         session.status = status;
         session.pending_approval = pending_approval.map(StoredPendingApproval::from);
         session.messages = reconcile_messages(&session.messages, history);
+        if should_refresh_session_name(session) {
+            if let Some(name) = infer_session_name(session, history) {
+                session.name = name;
+            }
+        }
         self.save(session)
     }
 
@@ -676,6 +722,7 @@ pub struct SessionInfo {
     pub parent_session_id: Option<String>,
     pub spawned_by_task_id: Option<String>,
     pub message_count: usize,
+    pub latest_user_summary: Option<String>,
 }
 
 impl From<&Session> for SessionInfo {
@@ -691,7 +738,71 @@ impl From<&Session> for SessionInfo {
             parent_session_id: value.parent_session_id.clone(),
             spawned_by_task_id: value.spawned_by_task_id.clone(),
             message_count: value.messages.len(),
+            latest_user_summary: value
+                .messages
+                .iter()
+                .rev()
+                .find(|message| message.role.eq_ignore_ascii_case("user"))
+                .map(|message| summarize_session_text(&message.content, 72)),
         }
+    }
+}
+
+impl SessionKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SessionKind::Primary => "primary",
+            SessionKind::Forked => "forked",
+            SessionKind::ChildAgent => "child_agent",
+        }
+    }
+
+    pub fn parse_filter(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "primary" | "main" | "root" => Some(SessionKind::Primary),
+            "fork" | "forked" | "branch" | "branched" => Some(SessionKind::Forked),
+            "child" | "child_agent" | "child-agent" | "agent" | "subagent" => {
+                Some(SessionKind::ChildAgent)
+            }
+            _ => None,
+        }
+    }
+}
+
+fn should_refresh_session_name(session: &Session) -> bool {
+    if session.session_kind != SessionKind::Primary {
+        return false;
+    }
+
+    session.name.trim().is_empty()
+        || session.name == session.id
+        || DEFAULT_PRIMARY_SESSION_NAMES
+            .iter()
+            .any(|name| session.name.eq_ignore_ascii_case(name))
+}
+
+fn infer_session_name(session: &Session, history: &[RuntimeMessage]) -> Option<String> {
+    history
+        .iter()
+        .find(|message| message.role == RuntimeRole::User && !message.content.trim().is_empty())
+        .map(|message| summarize_session_text(&message.content, 48))
+        .filter(|name| !name.is_empty())
+        .or_else(|| {
+            (!session.id.is_empty()).then(|| {
+                format!(
+                    "Session {}",
+                    &session.id.chars().take(8).collect::<String>()
+                )
+            })
+        })
+}
+
+fn summarize_session_text(text: &str, max: usize) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= max {
+        compact
+    } else {
+        compact.chars().take(max).collect::<String>() + "..."
     }
 }
 
@@ -881,5 +992,67 @@ mod tests {
         let message = Message::from(&RuntimeMessage::compact_summary("summary"));
 
         assert_eq!(message.entry_type, TranscriptEntryType::CompactBoundary);
+    }
+
+    #[test]
+    fn save_runtime_state_auto_names_primary_session_from_first_user_turn() {
+        let manager = SessionManager::new();
+        let mut session = Session {
+            id: "session-1".to_string(),
+            name: "New Session".to_string(),
+            session_kind: SessionKind::Primary,
+            ..Session::default()
+        };
+
+        manager
+            .save_runtime_state(
+                &mut session,
+                &[
+                    RuntimeMessage::user("Investigate why the Android build keeps failing"),
+                    RuntimeMessage::assistant("Looking into it"),
+                ],
+                SessionStatus::Completed,
+                None,
+            )
+            .unwrap();
+
+        assert!(session
+            .name
+            .starts_with("Investigate why the Android build"));
+    }
+
+    #[test]
+    fn session_info_captures_latest_user_summary() {
+        let session = Session {
+            messages: vec![
+                Message::from(&RuntimeMessage::user("first prompt")),
+                Message::from(&RuntimeMessage::assistant("response")),
+                Message::from(&RuntimeMessage::user("latest prompt summary text")),
+            ],
+            ..Session::default()
+        };
+
+        let info = SessionInfo::from(&session);
+        assert_eq!(
+            info.latest_user_summary.as_deref(),
+            Some("latest prompt summary text")
+        );
+    }
+
+    #[test]
+    fn session_kind_parse_filter_accepts_aliases() {
+        assert_eq!(
+            SessionKind::parse_filter("branch"),
+            Some(SessionKind::Forked)
+        );
+        assert_eq!(
+            SessionKind::parse_filter("subagent"),
+            Some(SessionKind::ChildAgent)
+        );
+        assert_eq!(
+            SessionKind::parse_filter("main"),
+            Some(SessionKind::Primary)
+        );
+        assert_eq!(SessionKind::parse_filter("unknown"), None);
     }
 }

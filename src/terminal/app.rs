@@ -32,7 +32,7 @@ use crate::{
         ApprovalAction, QueryEngine, QueryProgressEvent, QueryTurnResult, RuntimeMessage,
         TurnStatus,
     },
-    session::{SessionInfo, SessionKind},
+    session::{SessionInfo, SessionKind, SessionQuery},
 };
 use crossterm::{
     event::{
@@ -153,11 +153,14 @@ impl TerminalApp {
                 }
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                     if self.state.view == ViewMode::Chat && self.state.has_selection() {
-                        match copy_text_to_clipboard(
-                            self.state.selection_text().unwrap_or_default(),
-                        ) {
+                        let selection_text = self.state.selection_text().unwrap_or_default();
+                        match copy_text_to_clipboard(selection_text.clone()) {
                             Ok(()) => {
-                                self.state.status = "Selection copied to clipboard.".to_string();
+                                self.state.mark_selection_copied(&selection_text);
+                                self.state.status =
+                                    self.state.last_copy_status.clone().unwrap_or_else(|| {
+                                        "Selection copied to clipboard.".to_string()
+                                    });
                             }
                             Err(error) => {
                                 self.state.status = format!("Clipboard copy failed: {}", error);
@@ -179,10 +182,14 @@ impl TerminalApp {
                     match mouse.kind {
                         MouseEventKind::ScrollDown => {
                             self.state.scroll_offset = self.state.scroll_offset.saturating_sub(3);
+                            if self.state.scroll_offset == 0 {
+                                self.state.chat_auto_follow = true;
+                            }
                             return Ok(self.state.scroll_offset != old_offset);
                         }
                         MouseEventKind::ScrollUp => {
                             self.state.scroll_offset = self.state.scroll_offset.saturating_add(3);
+                            self.state.chat_auto_follow = false;
                             return Ok(self.state.scroll_offset != old_offset);
                         }
                         _ => {}
@@ -228,12 +235,18 @@ impl TerminalApp {
                                     );
                                     self.state.finish_selection(focus);
                                     if self.state.has_selection() {
-                                        match copy_text_to_clipboard(
-                                            self.state.selection_text().unwrap_or_default(),
-                                        ) {
+                                        let selection_text =
+                                            self.state.selection_text().unwrap_or_default();
+                                        match copy_text_to_clipboard(selection_text.clone()) {
                                             Ok(()) => {
-                                                self.state.status =
-                                                    "Selection copied to clipboard.".to_string();
+                                                self.state.mark_selection_copied(&selection_text);
+                                                self.state.status = self
+                                                    .state
+                                                    .last_copy_status
+                                                    .clone()
+                                                    .unwrap_or_else(|| {
+                                                        "Selection copied to clipboard.".to_string()
+                                                    });
                                             }
                                             Err(error) => {
                                                 self.state.status =
@@ -314,40 +327,54 @@ impl TerminalApp {
             KeyCode::Up if self.state.transcript_mode == TranscriptViewMode::Transcript => {
                 let old_offset = self.state.scroll_offset;
                 self.state.scroll_offset = self.state.scroll_offset.saturating_add(1);
+                self.state.chat_auto_follow = false;
                 self.state.scroll_offset != old_offset
             }
             KeyCode::Down if self.state.transcript_mode == TranscriptViewMode::Transcript => {
                 let old_offset = self.state.scroll_offset;
                 self.state.scroll_offset = self.state.scroll_offset.saturating_sub(1);
+                if self.state.scroll_offset == 0 {
+                    self.state.chat_auto_follow = true;
+                }
                 self.state.scroll_offset != old_offset
             }
             KeyCode::PageUp if self.state.transcript_mode == TranscriptViewMode::Transcript => {
                 let old_offset = self.state.scroll_offset;
                 self.state.scroll_offset = self.state.scroll_offset.saturating_add(12);
+                self.state.chat_auto_follow = false;
                 self.state.scroll_offset != old_offset
             }
             KeyCode::PageDown if self.state.transcript_mode == TranscriptViewMode::Transcript => {
                 let old_offset = self.state.scroll_offset;
                 self.state.scroll_offset = self.state.scroll_offset.saturating_sub(12);
+                if self.state.scroll_offset == 0 {
+                    self.state.chat_auto_follow = true;
+                }
                 self.state.scroll_offset != old_offset
             }
             KeyCode::Home if self.state.transcript_mode == TranscriptViewMode::Transcript => {
                 self.state.scroll_offset = usize::MAX / 4;
+                self.state.chat_auto_follow = false;
                 true
             }
             KeyCode::End if self.state.transcript_mode == TranscriptViewMode::Transcript => {
                 let changed = self.state.scroll_offset != 0;
                 self.state.scroll_offset = 0;
+                self.state.chat_auto_follow = true;
                 changed
             }
             KeyCode::Char('k') if self.state.transcript_mode == TranscriptViewMode::Transcript => {
                 let old_offset = self.state.scroll_offset;
                 self.state.scroll_offset = self.state.scroll_offset.saturating_add(1);
+                self.state.chat_auto_follow = false;
                 self.state.scroll_offset != old_offset
             }
             KeyCode::Char('j') if self.state.transcript_mode == TranscriptViewMode::Transcript => {
                 let old_offset = self.state.scroll_offset;
                 self.state.scroll_offset = self.state.scroll_offset.saturating_sub(1);
+                if self.state.scroll_offset == 0 {
+                    self.state.chat_auto_follow = true;
+                }
                 self.state.scroll_offset != old_offset
             }
             KeyCode::Enter => {
@@ -373,6 +400,7 @@ impl TerminalApp {
                 if self.state.has_selection() {
                     self.state.clear_selection();
                     self.state.mark_chat_render_dirty();
+                    self.state.status = "Selection cleared.".to_string();
                     return true;
                 }
                 if self.state.transcript_mode == TranscriptViewMode::Transcript {
@@ -1048,6 +1076,7 @@ impl TerminalApp {
         self.state.messages.push(message);
         self.state.input.clear();
         self.state.scroll_offset = 0;
+        self.state.chat_auto_follow = true;
         self.state.thinking = true;
         self.state.spinner_tick = 0;
         self.state.last_tick = std::time::Instant::now();
@@ -1129,7 +1158,7 @@ impl TerminalApp {
                 true
             }
             LocalCommand::Resume { session_id } => match session_id {
-                Some(session_id) => self.resume_session_by_id(&session_id),
+                Some(session_id) => self.resume_session_by_query(&session_id),
                 None => self.open_resume_picker(),
             },
         }
@@ -1356,6 +1385,7 @@ impl TerminalApp {
                     self.state.resume_picker = Some(ResumePickerState {
                         sessions,
                         selected: 0,
+                        query: None,
                     });
                     self.state.permissions_view = None;
                     self.state.status = "Select a session to resume.".to_string();
@@ -1397,6 +1427,48 @@ impl TerminalApp {
                     format!("Session restore failed: {}", error),
                 ));
                 self.state.mark_chat_render_dirty();
+                true
+            }
+        }
+    }
+
+    fn resume_session_by_query(&mut self, query: &str) -> bool {
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return self.open_resume_picker();
+        }
+
+        let parsed_query = parse_resume_query(trimmed);
+
+        match self.state.session_manager.search(parsed_query) {
+            Ok(mut sessions) => {
+                if let Some(active_id) = &self.state.active_session_id {
+                    sessions.retain(|session| session.id != *active_id);
+                }
+                if sessions.is_empty() {
+                    self.state.status =
+                        format!("No sessions matched '{}' .", trimmed).replace("' .", "'.");
+                    self.push_system_message(format!("No sessions matched '{}'.", trimmed));
+                    return true;
+                }
+                if sessions.len() == 1 {
+                    let session_id = sessions[0].id.clone();
+                    return self.resume_session_by_id(&session_id);
+                }
+
+                self.state.resume_picker = Some(ResumePickerState {
+                    sessions,
+                    selected: 0,
+                    query: Some(trimmed.to_string()),
+                });
+                self.state.permissions_view = None;
+                self.state.status = format!("Multiple sessions matched '{}'.", trimmed);
+                self.state.mark_chat_render_dirty();
+                true
+            }
+            Err(error) => {
+                self.state.status = format!("Session search failed: {}", error);
+                self.push_system_message(format!("Session search failed: {}", error));
                 true
             }
         }
@@ -1527,7 +1599,7 @@ impl TerminalApp {
             }
             QueryProgressEvent::ThinkingText(chunk) => {
                 self.state.append_streaming_thinking_text(&chunk);
-                self.state.status = "Streaming reasoning…".to_string();
+                self.state.status = "Streaming reasoning...".to_string();
             }
             QueryProgressEvent::AssistantText(chunk) => {
                 self.state.append_streaming_assistant_text(&chunk);
@@ -1536,14 +1608,22 @@ impl TerminalApp {
             QueryProgressEvent::ToolCall(tool_call) => {
                 self.state.live_assistant_message = None;
                 self.state.live_thinking_message = None;
-                self.state.messages.push(DisplayMessage::transient(
-                    DisplayRole::Tool,
-                    format!(
-                        "Tool request: {} {}",
-                        tool_call.name,
-                        format_arguments_preview(&tool_call.arguments)
-                    ),
-                ));
+                let content = format!(
+                    "Preparing tool: {}{}",
+                    tool_call.name,
+                    bounded_argument_preview(&tool_call.arguments, 4)
+                );
+                if let Some(index) = self.state.live_tool_message {
+                    if let Some(message) = self.state.messages.get_mut(index) {
+                        message.content = content;
+                    }
+                } else {
+                    self.state
+                        .messages
+                        .push(DisplayMessage::transient(DisplayRole::Tool, content));
+                    self.state.live_tool_message =
+                        Some(self.state.messages.len().saturating_sub(1));
+                }
                 self.state.status = format!("Running tool {}.", tool_call.name);
                 self.state.mark_chat_render_dirty();
             }
@@ -1555,16 +1635,28 @@ impl TerminalApp {
                 } else {
                     format!("Tool result: {}", result.name)
                 };
-                self.state.messages.push(DisplayMessage::transient(
-                    DisplayRole::Tool,
-                    format!("{}{}", label, format_tool_body(&result.content)),
-                ));
+                let content = format!("{}{}", label, format_tool_body(&result.content));
+                if let Some(index) = self.state.live_tool_message.take() {
+                    if let Some(message) = self.state.messages.get_mut(index) {
+                        message.role = DisplayRole::Tool;
+                        message.content = content;
+                    } else {
+                        self.state
+                            .messages
+                            .push(DisplayMessage::transient(DisplayRole::Tool, content));
+                    }
+                } else {
+                    self.state
+                        .messages
+                        .push(DisplayMessage::transient(DisplayRole::Tool, content));
+                }
                 self.state.status = format!("Completed tool {}.", result.name);
                 self.state.mark_chat_render_dirty();
             }
             QueryProgressEvent::AwaitingApproval(pending) => {
                 self.state.live_assistant_message = None;
                 self.state.live_thinking_message = None;
+                self.state.live_tool_message = None;
                 self.state.status =
                     format!("Tool approval required for {}.", pending.tool_call.name);
             }
@@ -1573,8 +1665,12 @@ impl TerminalApp {
 
     fn apply_turn_result(&mut self, turn: QueryTurnResult) {
         self.state.last_usage_total = turn.usage.as_ref().map(|usage| usage.total_tokens);
+        let should_follow = self.state.chat_auto_follow || self.state.scroll_offset == 0;
         self.state.replace_history(turn.history);
-        self.state.scroll_offset = 0;
+        if should_follow {
+            self.state.scroll_offset = 0;
+            self.state.chat_auto_follow = true;
+        }
 
         match turn.status {
             TurnStatus::Completed => {
@@ -1848,7 +1944,7 @@ impl TerminalApp {
             }
         }
 
-        let active_tasks = tasks
+        let mut active_tasks = tasks
             .into_iter()
             .filter(|task| {
                 matches!(
@@ -1865,6 +1961,12 @@ impl TerminalApp {
                 status: task.status,
             })
             .collect::<Vec<_>>();
+        active_tasks.sort_by_key(|task| match task.status {
+            crate::agents_runtime::AgentTaskStatus::AwaitingApproval => 0,
+            crate::agents_runtime::AgentTaskStatus::Running => 1,
+            crate::agents_runtime::AgentTaskStatus::Pending => 2,
+            _ => 3,
+        });
 
         let unchanged = self.state.active_tasks.len() == active_tasks.len()
             && self
@@ -2034,6 +2136,8 @@ fn render_chat(
     let visible = area.height;
 
     let max_scroll = total_lines.saturating_sub(visible);
+    state.scroll_offset =
+        clamp_scroll_offset(total_lines as usize, visible as usize, state.scroll_offset);
     let scroll_up = state.scroll_offset as u16;
     let scroll_row = max_scroll.saturating_sub(scroll_up);
     state.chat_area = area;
@@ -2042,6 +2146,10 @@ fn render_chat(
     let paragraph = std::mem::take(&mut state.chat_render_cache).scroll((scroll_row, 0));
     frame.render_widget(&paragraph, area);
     state.chat_render_cache = paragraph.scroll((0, 0));
+}
+
+fn clamp_scroll_offset(total_lines: usize, visible_lines: usize, requested: usize) -> usize {
+    total_lines.saturating_sub(visible_lines).min(requested)
 }
 
 fn ensure_chat_cache(state: &mut TerminalState, theme: TerminalTheme, width: u16) {
@@ -2200,21 +2308,46 @@ fn render_chat_lines(
         }
         push_wrapped_line(
             &mut lines,
-            format!("Tool: {}", approval.pending.tool_call.name),
+            format!(
+                "Tool: {}{}",
+                approval.pending.tool_call.name,
+                approval
+                    .risk_label
+                    .as_deref()
+                    .map(|risk| format!(" · {}", risk))
+                    .unwrap_or_default()
+            ),
             Style::default().fg(theme.text),
             width,
         );
+        if let Some(summary) = approval.tool_summary.as_deref() {
+            push_wrapped_line(
+                &mut lines,
+                format!("Summary: {}", summary),
+                theme.muted_style(),
+                width,
+            );
+        }
         push_wrapped_line(
             &mut lines,
             format!("Reason: {}", approval.pending.reason),
             Style::default().fg(theme.text),
             width,
         );
-        for preview_line in approval.arguments_preview.lines() {
+        let preview_lines = approval.arguments_preview.lines().collect::<Vec<_>>();
+        for preview_line in preview_lines.iter().take(8) {
             push_wrapped_line(
                 &mut lines,
                 format!("Args: {}", preview_line),
                 Style::default().fg(theme.text),
+                width,
+            );
+        }
+        if preview_lines.len() > 8 {
+            push_wrapped_line(
+                &mut lines,
+                format!("... {} more argument line(s)", preview_lines.len() - 8),
+                theme.muted_style(),
                 width,
             );
         }
@@ -2245,6 +2378,14 @@ fn render_chat_lines(
             theme.muted_style(),
             width,
         );
+        if let Some(query) = picker.query.as_deref() {
+            push_wrapped_line(
+                &mut lines,
+                format!("Filtered by: {}", query),
+                theme.muted_style(),
+                width,
+            );
+        }
         for (index, session) in picker.sessions.iter().enumerate() {
             push_wrapped_line(
                 &mut lines,
@@ -2699,11 +2840,12 @@ fn render_prompt(
             )),
         ]
     } else if state.has_selection() {
+        let copied = state
+            .last_copy_status
+            .as_deref()
+            .unwrap_or("Selection active.");
         vec![
-            Line::from(Span::styled(
-                "Selection copied. Drag to adjust; Ctrl+C copies again.",
-                theme.muted_style(),
-            )),
+            Line::from(Span::styled(copied.to_string(), theme.muted_style())),
             Line::from(Span::styled(
                 "Esc clears selection. Double-click selects word; triple-click selects line.",
                 theme.muted_style(),
@@ -2762,7 +2904,7 @@ fn render_prompt(
         if state.active_tasks.len() > 2 {
             lines.push(Line::from(Span::styled(
                 format!(
-                    "… and {} more running task(s)",
+                    "... and {} more running task(s)",
                     state.active_tasks.len() - 2
                 ),
                 theme.muted_style(),
@@ -2777,7 +2919,7 @@ fn render_prompt(
                 state.spinner_char().to_string(),
                 Style::default().fg(theme.brand),
             ),
-            Span::styled(" thinking…", theme.muted_style()),
+            Span::styled(" thinking...", theme.muted_style()),
         ]));
     }
 
@@ -2807,6 +2949,27 @@ fn render_approval_buttons(focus_index: usize, theme: TerminalTheme) -> Vec<Span
         spans.push(Span::styled(format!("[{}]", label), style));
     }
     spans
+}
+
+fn bounded_argument_preview(arguments: &serde_json::Value, max_lines: usize) -> String {
+    let preview = format_arguments_preview(arguments);
+    let lines = preview.lines().collect::<Vec<_>>();
+    if lines.is_empty() {
+        return String::new();
+    }
+    let mut bounded = lines
+        .iter()
+        .take(max_lines)
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n");
+    if lines.len() > max_lines {
+        bounded.push_str(&format!(
+            "\n... {} more argument line(s)",
+            lines.len() - max_lines
+        ));
+    }
+    format!("\nArgs: {}", bounded)
 }
 
 fn render_status_line(
@@ -2988,6 +3151,14 @@ fn render_resume_session_line(
         Span::styled(kind, Style::default().fg(theme.subtle)),
         Span::styled("  ", theme.muted_style()),
         Span::styled(status, Style::default().fg(theme.subtle)),
+        Span::styled(
+            session
+                .latest_user_summary
+                .as_deref()
+                .map(|summary| format!("  {}", summary))
+                .unwrap_or_default(),
+            theme.muted_style(),
+        ),
         Span::styled(
             session
                 .forked_from_session_id
@@ -3560,6 +3731,28 @@ fn update_local_permission_rules(
     }
 }
 
+fn parse_resume_query(input: &str) -> SessionQuery {
+    let mut kind = None;
+    let mut text_tokens = Vec::new();
+
+    for token in input.split_whitespace() {
+        if let Some(value) = token.strip_prefix("kind:") {
+            kind = SessionKind::parse_filter(value).or(kind);
+            continue;
+        }
+
+        text_tokens.push(token);
+    }
+
+    let text = (!text_tokens.is_empty()).then(|| text_tokens.join(" "));
+
+    SessionQuery {
+        text,
+        kind,
+        limit: Some(20),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3666,5 +3859,43 @@ mod tests {
             format_task_progress_status(crate::agents_runtime::AgentTaskStatus::Pending),
             "queued"
         );
+    }
+
+    #[test]
+    fn clamp_scroll_offset_caps_large_home_offset() {
+        assert_eq!(clamp_scroll_offset(120, 20, usize::MAX / 4), 100);
+        assert_eq!(clamp_scroll_offset(10, 20, 8), 0);
+    }
+
+    #[test]
+    fn task_progress_summary_prioritizes_awaiting_approval() {
+        let tasks = vec![
+            TaskProgressItem {
+                id: "1".to_string(),
+                subject: "inspect".to_string(),
+                agent_type: "explore".to_string(),
+                status: crate::agents_runtime::AgentTaskStatus::AwaitingApproval,
+            },
+            TaskProgressItem {
+                id: "2".to_string(),
+                subject: "verify".to_string(),
+                agent_type: "verification".to_string(),
+                status: crate::agents_runtime::AgentTaskStatus::Running,
+            },
+        ];
+
+        assert_eq!(
+            format_task_progress_summary(&tasks),
+            "1 running, 1 awaiting approval"
+        );
+    }
+
+    #[test]
+    fn parse_resume_query_extracts_kind_filter() {
+        let query = parse_resume_query("kind:branch android build");
+
+        assert_eq!(query.kind, Some(SessionKind::Forked));
+        assert_eq!(query.text.as_deref(), Some("android build"));
+        assert_eq!(query.limit, Some(20));
     }
 }

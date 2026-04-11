@@ -1,6 +1,6 @@
 use crate::{
     api::ApiClient,
-    compact::CompactService,
+    compact::{service::CompactDecision, CompactService},
     config::{
         add_project_local_permission_rule, project_root_from, ProjectPermissionRuleKind, Settings,
     },
@@ -118,10 +118,31 @@ where
         session_id: Option<String>,
         progress: &mut dyn ProgressSink,
     ) -> anyhow::Result<QueryTurnResult> {
+        let history = match &self.compact_service {
+            Some(compact_service) => {
+                let decision = compact_service.reactive_compact_decision(history, Some(&message));
+                if !matches!(
+                    decision,
+                    CompactDecision::MicroCompact | CompactDecision::FullCompact
+                ) {
+                    history.to_vec()
+                } else {
+                    match compact_service
+                        .compact_history_with_decision(history, None, decision)
+                        .await
+                    {
+                        Ok(outcome) => outcome.history,
+                        Err(_) => history.to_vec(),
+                    }
+                }
+            }
+            _ => history.to_vec(),
+        };
+
         let result = self
             .query_loop
             .submit_turn_with_progress(
-                history,
+                &history,
                 message,
                 ToolExecutionContext { session_id },
                 progress,
