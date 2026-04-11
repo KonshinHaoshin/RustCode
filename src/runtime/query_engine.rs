@@ -284,7 +284,7 @@ impl<G, T, P> QueryEngine<G, T, P> {
         }
 
         let system_prompt = build_system_prompt(&self.settings, self.project_root.as_deref());
-        history.insert(0, RuntimeMessage::system(system_prompt));
+        history.insert(0, RuntimeMessage::internal_system(system_prompt));
         history
     }
 

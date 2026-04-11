@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 const COMPACT_SUMMARY_PREFIX: &str = "Previous conversation compacted into summary:\n";
 const MICRO_COMPACT_SUMMARY_PREFIX: &str = "Previous conversation micro-compacted into summary:\n";
+const INTERNAL_SYSTEM_PREFIX: &str = "[[RUSTCODE_INTERNAL_SYSTEM]]\n";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RuntimeRole {
@@ -66,6 +67,10 @@ impl RuntimeMessage {
         Self::new(RuntimeRole::System, content)
     }
 
+    pub fn internal_system(content: impl Into<String>) -> Self {
+        Self::system(format!("{}{}", INTERNAL_SYSTEM_PREFIX, content.into()))
+    }
+
     pub fn user(content: impl Into<String>) -> Self {
         Self::new(RuntimeRole::User, content)
     }
@@ -110,6 +115,16 @@ impl RuntimeMessage {
                 || self.content.starts_with(MICRO_COMPACT_SUMMARY_PREFIX))
     }
 
+    pub fn is_internal_system(&self) -> bool {
+        self.role == RuntimeRole::System && self.content.starts_with(INTERNAL_SYSTEM_PREFIX)
+    }
+
+    pub fn visible_system_content(&self) -> &str {
+        self.content
+            .strip_prefix(INTERNAL_SYSTEM_PREFIX)
+            .unwrap_or(&self.content)
+    }
+
     pub fn has_tool_calls(&self) -> bool {
         !self.tool_calls.is_empty()
     }
@@ -131,6 +146,9 @@ impl From<RuntimeMessage> for ChatMessage {
 
         let (content, tool_call_id, name) = match value.tool_result {
             Some(result) => (result.content, Some(result.tool_call_id), Some(result.name)),
+            None if value.role == RuntimeRole::System => {
+                (value.visible_system_content().to_string(), None, None)
+            }
             None => (value.content, None, None),
         };
 
@@ -164,6 +182,9 @@ impl From<&RuntimeMessage> for ChatMessage {
                 Some(result.tool_call_id.clone()),
                 Some(result.name.clone()),
             ),
+            None if value.role == RuntimeRole::System => {
+                (value.visible_system_content().to_string(), None, None)
+            }
             None => (value.content.clone(), None, None),
         };
 

@@ -11,7 +11,7 @@ pub fn builtin_command_specs() -> Vec<SlashCommandSpec> {
         ),
         prompt(
             "init",
-            "Analyze this codebase and create or update rustcode.md",
+            "Analyze this codebase and create or update .rustcode/rustcode.md",
             None,
         ),
         native(

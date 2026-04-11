@@ -167,6 +167,8 @@ pub struct ApiConfig {
     pub streaming: bool,
     /// Beta headers to include
     pub beta_headers: Vec<String>,
+    /// Optional OpenAI-compatible response_format object.
+    pub response_format: Option<serde_json::Value>,
     /// Fallback request chain
     pub fallback: FallbackConfig,
 }
@@ -186,6 +188,7 @@ impl Default for ApiConfig {
             timeout: 120,
             streaming: true,
             beta_headers: Vec::new(),
+            response_format: None,
             fallback: FallbackConfig::default(),
         }
     }

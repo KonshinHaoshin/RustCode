@@ -272,6 +272,20 @@ impl TerminalApp {
                 }
                 Ok(false)
             }
+            Event::Paste(text) => {
+                if self.state.view != ViewMode::Chat {
+                    return Ok(false);
+                }
+                if text.chars().count() > 2048 || text.lines().count() > 8 {
+                    let token = self.state.register_paste(text);
+                    self.state.input.push_str(&token);
+                    self.state.status = "Large paste collapsed in input box.".to_string();
+                } else {
+                    self.state.input.push_str(&text);
+                }
+                self.state.refresh_slash_menu();
+                Ok(true)
+            }
             Event::Resize(_, _) => Ok(true),
             _ => Ok(false),
         }
@@ -1086,10 +1100,11 @@ impl TerminalApp {
     }
 
     fn submit_prompt(&mut self) -> bool {
-        let prompt = self.state.input.trim().to_string();
-        if prompt.is_empty() {
+        let display_prompt = self.state.input.trim().to_string();
+        if display_prompt.is_empty() {
             return false;
         }
+        let prompt = self.state.resolve_input_for_submission().trim().to_string();
 
         match InputProcessor::new().process(&prompt) {
             ProcessedInput::LocalCommand(command) => {
@@ -1106,19 +1121,19 @@ impl TerminalApp {
                 if self.state.thinking || self.state.pending_approval.is_some() {
                     return false;
                 }
-                self.submit_runtime_prompt(prompt);
+                self.submit_runtime_prompt(display_prompt, prompt);
                 true
             }
         }
     }
 
-    fn submit_runtime_prompt(&mut self, prompt: String) {
+    fn submit_runtime_prompt(&mut self, display_prompt: String, prompt: String) {
         if let Err(error) = self.ensure_active_session() {
             self.push_system_message(format!("Failed to initialize session: {}", error));
             self.state.status = "Session initialization failed.".to_string();
             return;
         }
-        let message = DisplayMessage::transient(DisplayRole::User, prompt.clone());
+        let message = DisplayMessage::transient(DisplayRole::User, display_prompt);
         self.state.messages.push(message);
         self.state.input.clear();
         self.state.scroll_offset = 0;

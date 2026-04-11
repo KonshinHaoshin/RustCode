@@ -288,6 +288,14 @@ pub struct TerminalState {
     pub selection_copied_at: Option<Instant>,
     pub slash_menu_visible: bool,
     pub slash_menu_selected: usize,
+    pub pasted_chunks: Vec<PastedChunk>,
+    pub next_paste_id: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct PastedChunk {
+    pub token: String,
+    pub content: String,
 }
 
 impl TerminalState {
@@ -407,6 +415,8 @@ impl TerminalState {
             selection_copied_at: None,
             slash_menu_visible: false,
             slash_menu_selected: 0,
+            pasted_chunks: Vec::new(),
+            next_paste_id: 1,
         }
     }
 
@@ -424,11 +434,78 @@ impl TerminalState {
         if !self.slash_menu_visible || commands.is_empty() {
             return false;
         }
-        let index = self.slash_menu_selected.min(commands.len().saturating_sub(1));
+        let index = self
+            .slash_menu_selected
+            .min(commands.len().saturating_sub(1));
         self.input = format!("/{} ", commands[index].name);
         self.slash_menu_visible = false;
         self.slash_menu_selected = 0;
         true
+    }
+
+    pub fn register_paste(&mut self, content: String) -> String {
+        let id = self.next_paste_id;
+        self.next_paste_id += 1;
+        let token = Self::format_paste_token(&content, id);
+        self.pasted_chunks.push(PastedChunk {
+            token: token.clone(),
+            content,
+        });
+        token
+    }
+
+    pub fn resolve_input_for_submission(&mut self) -> String {
+        let mut resolved = self.input.clone();
+        for chunk in &self.pasted_chunks {
+            resolved = resolved.replace(&chunk.token, &chunk.content);
+        }
+        self.pasted_chunks.clear();
+        resolved
+    }
+
+    fn format_paste_token(content: &str, id: usize) -> String {
+        let trimmed = content.trim();
+        let chars = content.chars().count();
+        if let Some(kind) = Self::pasted_image_kind(trimmed) {
+            return format!("[Pasted Image {} {} chars #{}]", kind, chars, id);
+        }
+        if Self::looks_like_binary_or_base64(trimmed) {
+            return format!("[Pasted Binary {} chars #{}]", chars, id);
+        }
+        format!("[Pasted Content {} chars #{}]", chars, id)
+    }
+
+    fn pasted_image_kind(value: &str) -> Option<&'static str> {
+        let lower = value.to_ascii_lowercase();
+        if lower.starts_with("data:image/png;base64,") {
+            Some("png")
+        } else if lower.starts_with("data:image/jpeg;base64,")
+            || lower.starts_with("data:image/jpg;base64,")
+        {
+            Some("jpeg")
+        } else if lower.starts_with("data:image/webp;base64,") {
+            Some("webp")
+        } else if lower.starts_with("data:image/gif;base64,") {
+            Some("gif")
+        } else if lower.ends_with(".png") {
+            Some("png-path")
+        } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+            Some("jpeg-path")
+        } else if lower.ends_with(".webp") {
+            Some("webp-path")
+        } else if lower.ends_with(".gif") {
+            Some("gif-path")
+        } else {
+            None
+        }
+    }
+
+    fn looks_like_binary_or_base64(value: &str) -> bool {
+        value.len() > 4096
+            && value.lines().count() <= 4
+            && value
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '/' | '=' | '\r' | '\n'))
     }
 
     pub fn consume_initial_prompt(&mut self) -> Option<String> {
@@ -849,13 +926,18 @@ impl TerminalState {
                         });
                     }
                 }
-                RuntimeRole::System => messages.push(DisplayMessage {
-                    role: DisplayRole::System,
-                    content: message.content.clone(),
-                    message_id: None,
-                    parent_id: None,
-                    entry_type: None,
-                }),
+                RuntimeRole::System => {
+                    if message.is_internal_system() {
+                        continue;
+                    }
+                    messages.push(DisplayMessage {
+                        role: DisplayRole::System,
+                        content: message.visible_system_content().to_string(),
+                        message_id: None,
+                        parent_id: None,
+                        entry_type: None,
+                    })
+                }
                 RuntimeRole::Tool => {
                     let tool_result = message.tool_result.as_ref();
                     let label = tool_result
@@ -917,13 +999,21 @@ impl TerminalState {
                         });
                     }
                 }
-                "system" => messages.push(DisplayMessage {
-                    role: DisplayRole::System,
-                    content: message.content.clone(),
-                    message_id: Some(message.id.clone()),
-                    parent_id: message.parent_id.clone(),
-                    entry_type: Some(message.entry_type),
-                }),
+                "system" => {
+                    if message
+                        .content
+                        .starts_with("[[RUSTCODE_INTERNAL_SYSTEM]]\n")
+                    {
+                        continue;
+                    }
+                    messages.push(DisplayMessage {
+                        role: DisplayRole::System,
+                        content: message.content.clone(),
+                        message_id: Some(message.id.clone()),
+                        parent_id: message.parent_id.clone(),
+                        entry_type: Some(message.entry_type),
+                    })
+                }
                 "tool" => {
                     let tool_result = message.tool_result.as_ref();
                     let label = tool_result

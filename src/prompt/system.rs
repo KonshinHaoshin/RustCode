@@ -42,7 +42,13 @@ pub fn build_system_prompt(settings: &Settings, cwd: Option<&Path>) -> String {
 
 fn load_memory_file(cwd: &Path, file_name: &str) -> Option<String> {
     find_upwards_file(cwd, file_name)
-        .or_else(|| Some(global_config_dir().join(file_name)).filter(|path| path.exists()))
+        .or_else(|| {
+            if file_name.contains('/') || file_name.contains('\\') {
+                None
+            } else {
+                Some(global_config_dir().join(file_name)).filter(|path| path.exists())
+            }
+        })
         .and_then(|path| fs::read_to_string(path).ok())
         .filter(|content| !content.trim().is_empty())
 }
@@ -67,7 +73,12 @@ mod tests {
     #[test]
     fn includes_project_memory_when_present() {
         let temp = tempfile::tempdir().unwrap();
-        std::fs::write(temp.path().join("rustcode.md"), "memory block").unwrap();
+        std::fs::create_dir_all(temp.path().join(".rustcode")).unwrap();
+        std::fs::write(
+            temp.path().join(".rustcode").join("rustcode.md"),
+            "memory block",
+        )
+        .unwrap();
         let mut settings = Settings::default();
         settings.working_dir = temp.path().to_path_buf();
         let prompt = build_system_prompt(&settings, Some(temp.path()));

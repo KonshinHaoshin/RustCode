@@ -159,7 +159,11 @@ impl Default for PromptSettings {
     fn default() -> Self {
         Self {
             vendor_claude_compat: true,
-            project_memory_files: vec!["rustcode.md".to_string(), "CLAUDE.md".to_string()],
+            project_memory_files: vec![
+                ".rustcode/rustcode.md".to_string(),
+                "rustcode.md".to_string(),
+                "CLAUDE.md".to_string(),
+            ],
         }
     }
 }
@@ -350,6 +354,20 @@ impl Settings {
             "max_tokens" => settings.api.max_tokens = value.parse().unwrap_or(4096),
             "timeout" => settings.api.timeout = value.parse().unwrap_or(120),
             "streaming" => settings.api.streaming = value.parse().unwrap_or(true),
+            "response_format" | "api.response_format" => {
+                let trimmed = value.trim();
+                settings.api.response_format = if trimmed.is_empty() {
+                    None
+                } else if trimmed.eq_ignore_ascii_case("text") {
+                    None
+                } else if trimmed.eq_ignore_ascii_case("json_object") {
+                    Some(serde_json::json!({ "type": "json_object" }))
+                } else {
+                    Some(serde_json::from_str(trimmed).map_err(|error| {
+                        anyhow::anyhow!("Invalid response_format JSON: {}", error)
+                    })?)
+                };
+            }
             "fallback.enabled" | "api.fallback.enabled" => {
                 settings.api.fallback.enabled = value.parse().unwrap_or(false)
             }

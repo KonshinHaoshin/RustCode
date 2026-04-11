@@ -551,6 +551,7 @@ impl ApiClient {
             max_tokens: self.settings.api.max_tokens,
             stream,
             temperature: 0.7,
+            response_format: self.settings.api.response_format.clone(),
             tools: (!tools.is_empty()).then(|| {
                 tools
                     .iter()
@@ -701,6 +702,8 @@ struct OpenAiChatRequest {
     max_tokens: usize,
     stream: bool,
     temperature: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<OpenAiToolDefinition>>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -16,14 +16,16 @@ pub struct InitOutcome {
 }
 
 pub fn run_init(cwd: &Path, mode: InitMode) -> anyhow::Result<InitOutcome> {
-    let path = cwd.join("rustcode.md");
+    let dir = cwd.join(".rustcode");
+    let path = dir.join("rustcode.md");
     let content = build_rustcode_md(cwd);
+    fs::create_dir_all(&dir)?;
     if path.exists() {
         match mode {
             InitMode::Create => {
                 return Ok(InitOutcome {
                     path,
-                    message: "rustcode.md already exists. Use /init --force to overwrite or /init --append to append.".to_string(),
+                    message: ".rustcode/rustcode.md already exists. Use /init --force to overwrite or /init --append to append.".to_string(),
                 });
             }
             InitMode::Force => fs::write(&path, content)?,
@@ -58,7 +60,7 @@ fn build_rustcode_md(cwd: &Path) -> String {
     let commands = common_commands(cwd, project_type);
     let structure = top_level_structure(cwd);
     format!(
-        "# rustcode.md\n\nThis file provides guidance to RustCode when working in this repository.\n\n## Project Overview\n\n- Project type: {}\n- Workspace root: {}\n\n## Build and Test Commands\n\n{}\n\n## Repository Structure\n\n{}\n\n## Coding Conventions\n\n- Follow the existing style in nearby files.\n- Prefer minimal, reviewable changes.\n- Verify changed behavior with the most relevant test or build command.\n\n## Tool and Permission Notes\n\n- Do not commit secrets or real credentials.\n- Treat file writes, shell commands, plugin installation, and networked actions as high-impact operations.\n\n## Known Constraints\n\n- Keep this file concise. Add only repository-specific facts that RustCode would not reliably infer from source files.\n",
+        "# rustcode.md\n\nThis file lives at `.rustcode/rustcode.md` and provides guidance to RustCode when working in this repository.\n\n## Project Overview\n\n- Project type: {}\n- Workspace root: {}\n\n## Build and Test Commands\n\n{}\n\n## Repository Structure\n\n{}\n\n## Coding Conventions\n\n- Follow the existing style in nearby files.\n- Prefer minimal, reviewable changes.\n- Verify changed behavior with the most relevant test or build command.\n\n## Tool and Permission Notes\n\n- Do not commit secrets or real credentials.\n- Treat file writes, shell commands, plugin installation, and networked actions as high-impact operations.\n\n## Known Constraints\n\n- Keep this file concise. Add only repository-specific facts that RustCode would not reliably infer from source files.\n",
         project_type,
         cwd.display(),
         commands,
@@ -144,7 +146,7 @@ mod tests {
     #[test]
     fn init_force_and_append_update_existing_file() {
         let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("rustcode.md");
+        let path = temp.path().join(".rustcode").join("rustcode.md");
         std::fs::write(&path, "custom").unwrap();
         run_init(temp.path(), InitMode::Append).unwrap();
         assert!(std::fs::read_to_string(&path)
