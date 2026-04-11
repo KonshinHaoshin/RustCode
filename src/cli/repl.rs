@@ -1,6 +1,7 @@
 //! REPL Module - Interactive Read-Eval-Print Loop
 
 use crate::compact::CompactService;
+use crate::input::commands::init::{run_init, InitMode};
 use crate::input::{
     format_help_text, format_status_text, InputProcessor, LocalCommand, ProcessedInput,
 };
@@ -82,10 +83,15 @@ impl Repl {
     }
 
     fn process_input(&mut self, input: &str) -> anyhow::Result<()> {
-        match InputProcessor::new().process(input) {
+        let prompt = match InputProcessor::new().process(input) {
             ProcessedInput::LocalCommand(command) => return self.execute_local_command(command),
-            ProcessedInput::Prompt(_) => {}
-        }
+            ProcessedInput::Error(message) => {
+                println!("{}", message);
+                println!();
+                return Ok(());
+            }
+            ProcessedInput::Prompt(prompt) => prompt,
+        };
 
         let engine = QueryEngine::new(self.state.settings.clone());
 
@@ -95,7 +101,7 @@ impl Repl {
 
         let messages = self.conversation_history.clone();
         let response = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(engine.submit_text_turn(&messages, input))
+            tokio::runtime::Handle::current().block_on(engine.submit_text_turn(&messages, prompt))
         });
 
         match response {
@@ -210,6 +216,20 @@ impl Repl {
         match command {
             LocalCommand::Help => self.print_help(),
             LocalCommand::Clear => self.reset_conversation(),
+            LocalCommand::Init { force, append } => {
+                println!();
+                let mode = if append {
+                    InitMode::Append
+                } else if force {
+                    InitMode::Force
+                } else {
+                    InitMode::Create
+                };
+                let cwd = std::env::current_dir()?;
+                let outcome = run_init(&cwd, mode)?;
+                println!("{}", outcome.message);
+                println!();
+            }
             LocalCommand::Branch { .. } => {
                 println!();
                 println!("/branch is only supported in the TUI right now.");

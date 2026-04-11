@@ -2,6 +2,10 @@
 pub enum LocalCommand {
     Help,
     Clear,
+    Init {
+        force: bool,
+        append: bool,
+    },
     Branch {
         message_id: Option<String>,
     },
@@ -26,4 +30,5 @@ pub enum LocalCommand {
 pub enum ProcessedInput {
     Prompt(String),
     LocalCommand(LocalCommand),
+    Error(String),
 }

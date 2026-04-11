@@ -40,6 +40,8 @@ pub struct Settings {
     pub session: SessionSettings,
     /// Compact settings
     pub compact: CompactSettings,
+    /// System prompt and project memory settings
+    pub prompt: PromptSettings,
     /// First-run onboarding state
     pub onboarding: OnboardingSettings,
 }
@@ -123,6 +125,15 @@ pub struct OnboardingSettings {
     pub last_onboarding_version: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PromptSettings {
+    /// Include the vendored Claude-compatible system prompt snapshot.
+    pub vendor_claude_compat: bool,
+    /// Project memory files to read, in priority order.
+    pub project_memory_files: Vec<String>,
+}
+
 impl Default for PluginSettings {
     fn default() -> Self {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
@@ -140,6 +151,15 @@ impl Default for OnboardingSettings {
         Self {
             has_completed_onboarding: false,
             last_onboarding_version: String::new(),
+        }
+    }
+}
+
+impl Default for PromptSettings {
+    fn default() -> Self {
+        Self {
+            vendor_claude_compat: true,
+            project_memory_files: vec!["rustcode.md".to_string(), "CLAUDE.md".to_string()],
         }
     }
 }
@@ -170,6 +190,7 @@ impl Default for Settings {
             permissions: PermissionsSettings::default(),
             session: SessionSettings::default(),
             compact: CompactSettings::default(),
+            prompt: PromptSettings::default(),
             onboarding: OnboardingSettings::default(),
         }
     }

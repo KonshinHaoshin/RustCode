@@ -5,6 +5,7 @@ use crate::{
         add_project_local_permission_rule, project_root_from, ProjectPermissionRuleKind, Settings,
     },
     permissions::{PermissionGate, SettingsPermissionGate},
+    prompt::build_system_prompt,
     runtime::{
         query_loop::{GatewayResponse, ModelGateway, QueryLoop},
         results::{ApprovalAction, NoopProgressSink, ProgressSink, QueryTurnResult, RuntimeUsage},
@@ -23,6 +24,7 @@ pub struct QueryEngine<G = ApiModelGateway, T = CompositeToolExecutor, P = Setti
     query_loop: QueryLoop<G, T, P>,
     project_root: Option<PathBuf>,
     compact_service: Option<CompactService>,
+    settings: Settings,
 }
 
 impl QueryEngine<ApiModelGateway, CompositeToolExecutor, SettingsPermissionGate> {
@@ -44,6 +46,7 @@ impl QueryEngine<ApiModelGateway, CompositeToolExecutor, SettingsPermissionGate>
             SettingsPermissionGate::new(permissions),
             project_root,
         )
+        .with_settings(settings.clone())
         .with_compact_service(compact_service)
     }
 }
@@ -59,7 +62,13 @@ impl<G, T, P> QueryEngine<G, T, P> {
             query_loop: QueryLoop::new(gateway, tool_executor, permission_gate),
             project_root,
             compact_service: None,
+            settings: Settings::default(),
         }
+    }
+
+    pub fn with_settings(mut self, settings: Settings) -> Self {
+        self.settings = settings;
+        self
     }
 
     pub fn with_compact_service(mut self, compact_service: CompactService) -> Self {
@@ -82,6 +91,7 @@ impl<G> QueryEngine<G, CompositeToolExecutor, SettingsPermissionGate> {
             SettingsPermissionGate::new(permissions),
             None,
         )
+        .with_settings(Settings::default())
     }
 }
 
@@ -138,6 +148,7 @@ where
             }
             _ => history.to_vec(),
         };
+        let history = self.with_system_prompt(history);
 
         let result = self
             .query_loop
@@ -264,6 +275,19 @@ where
 }
 
 impl<G, T, P> QueryEngine<G, T, P> {
+    fn with_system_prompt(&self, mut history: Vec<RuntimeMessage>) -> Vec<RuntimeMessage> {
+        if history
+            .iter()
+            .any(|message| matches!(message.role, crate::runtime::RuntimeRole::System))
+        {
+            return history;
+        }
+
+        let system_prompt = build_system_prompt(&self.settings, self.project_root.as_deref());
+        history.insert(0, RuntimeMessage::system(system_prompt));
+        history
+    }
+
     async fn apply_auto_compact(&self, result: QueryTurnResult) -> anyhow::Result<QueryTurnResult> {
         match &self.compact_service {
             Some(compact_service) => compact_service.maybe_auto_compact(result).await,

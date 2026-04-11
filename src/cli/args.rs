@@ -1,6 +1,7 @@
 //! CLI Arguments
 
 use super::CliArgs;
+use crate::input::commands::init::{run_init, InitMode};
 use crate::input::{
     format_help_text, format_status_text, InputProcessor, LocalCommand, ProcessedInput,
 };
@@ -113,12 +114,13 @@ impl Cli {
     }
 
     async fn run_query(&self, state: crate::state::AppState, prompt: String) -> anyhow::Result<()> {
-        match InputProcessor::new().process(&prompt) {
+        let prompt = match InputProcessor::new().process(&prompt) {
             ProcessedInput::LocalCommand(command) => {
                 return Self::run_query_local_command(state, command).await;
             }
-            ProcessedInput::Prompt(_) => {}
-        }
+            ProcessedInput::Prompt(prompt) => prompt,
+            ProcessedInput::Error(message) => return Err(anyhow::anyhow!(message)),
+        };
 
         let engine = crate::runtime::QueryEngine::new(state.settings.clone());
         let response = engine.submit_text_turn(&[], prompt).await?;
@@ -149,6 +151,18 @@ impl Cli {
                     "{}",
                     format_status_text(&state.settings, None, 0, false, None)
                 );
+            }
+            LocalCommand::Init { force, append } => {
+                let mode = if append {
+                    InitMode::Append
+                } else if force {
+                    InitMode::Force
+                } else {
+                    InitMode::Create
+                };
+                let cwd = std::env::current_dir()?;
+                let outcome = run_init(&cwd, mode)?;
+                println!("{}", outcome.message);
             }
             LocalCommand::Model { model } => {
                 if let Some(model) = model {

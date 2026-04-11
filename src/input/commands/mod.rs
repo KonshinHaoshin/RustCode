@@ -1,20 +1,41 @@
+pub mod builtin;
+pub mod init;
+pub mod markdown;
+pub mod registry;
+pub mod spec;
+
 use crate::{compact::CompactSettings, config::Settings};
+use registry::SlashCommandRegistry;
+use spec::{SlashCommandKind, SlashCommandSource};
 
 pub fn format_help_text() -> String {
-    [
-        "Available slash commands:",
-        "/help           Show available commands",
-        "/clear          Clear the active conversation and start a new session",
-        "/branch [id]    Fork the current session, optionally from a user message id",
-        "/compact [text] Compact history into a summary and keep recent context",
-        "/permissions    Inspect permission rules",
-        "/model [name]   Show or change the active model for this session",
-        "/rewind <id>    Rewind conversation and files to a user message id (or last-user)",
-        "/rewind-files <id> Rewind only files to a user message id (or last-user)",
-        "/status         Show current runtime status",
-        "/resume [query] Resume the latest or a matching session",
-    ]
-    .join("\n")
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let registry = SlashCommandRegistry::load(&cwd);
+    let mut lines = vec!["Available slash commands:".to_string()];
+    for command in registry.all() {
+        let source = match command.source {
+            SlashCommandSource::Builtin => "builtin",
+            SlashCommandSource::Project => "project",
+            SlashCommandSource::User => "user",
+            SlashCommandSource::ClaudeCompat => "claude-compat",
+            SlashCommandSource::VendoredPrompt => "prompt",
+        };
+        let kind = match &command.kind {
+            SlashCommandKind::Native => "native",
+            SlashCommandKind::Prompt => "prompt",
+            SlashCommandKind::FileBacked { .. } => "markdown",
+        };
+        let hint = command
+            .argument_hint
+            .as_deref()
+            .map(|value| format!(" {}", value))
+            .unwrap_or_default();
+        lines.push(format!(
+            "/{}{}  {} [{}:{}]",
+            command.name, hint, command.description, source, kind
+        ));
+    }
+    lines.join("\n")
 }
 
 pub fn format_status_text(

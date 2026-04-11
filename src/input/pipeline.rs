@@ -1,4 +1,4 @@
-use crate::input::{slash::parse_slash_command, ProcessedInput};
+use crate::input::{slash::process_slash_input, ProcessedInput};
 
 #[derive(Default)]
 pub struct InputProcessor;
@@ -9,8 +9,8 @@ impl InputProcessor {
     }
 
     pub fn process(&self, input: &str) -> ProcessedInput {
-        parse_slash_command(input)
-            .map(ProcessedInput::LocalCommand)
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        process_slash_input(input, &cwd)
             .unwrap_or_else(|| ProcessedInput::Prompt(input.trim().to_string()))
     }
 }

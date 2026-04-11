@@ -25,6 +25,7 @@ use crate::{
         ProjectPermissionRuleKind, Settings,
     },
     file_history::FileHistoryStore,
+    input::commands::init::{run_init, InitMode},
     input::{format_help_text, format_status_text, InputProcessor, LocalCommand, ProcessedInput},
     onboarding::OnboardingDraft,
     permissions::events::{PermissionEvent, PermissionEventStore},
@@ -1056,6 +1057,12 @@ impl TerminalApp {
                 self.state.input.clear();
                 self.execute_local_command(command)
             }
+            ProcessedInput::Error(message) => {
+                self.state.input.clear();
+                self.push_system_message(message.clone());
+                self.state.status = message;
+                true
+            }
             ProcessedInput::Prompt(prompt) => {
                 if self.state.thinking || self.state.pending_approval.is_some() {
                     return false;
@@ -1112,6 +1119,28 @@ impl TerminalApp {
                 self.state.reset_conversation();
                 self.state.status = "Cleared conversation and reset active session.".to_string();
                 self.state.mark_chat_render_dirty();
+                true
+            }
+            LocalCommand::Init { force, append } => {
+                let mode = if append {
+                    InitMode::Append
+                } else if force {
+                    InitMode::Force
+                } else {
+                    InitMode::Create
+                };
+                let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                match run_init(&cwd, mode) {
+                    Ok(outcome) => {
+                        self.push_system_message(outcome.message.clone());
+                        self.state.status = outcome.message;
+                    }
+                    Err(error) => {
+                        let message = format!("/init failed: {}", error);
+                        self.push_system_message(message.clone());
+                        self.state.status = message;
+                    }
+                }
                 true
             }
             LocalCommand::Branch { message_id } => match message_id {

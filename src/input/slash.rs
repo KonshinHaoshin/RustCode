@@ -1,45 +1,124 @@
-use crate::input::types::LocalCommand;
+use crate::input::{
+    commands::{registry::SlashCommandRegistry, spec::SlashCommandKind},
+    types::{LocalCommand, ProcessedInput},
+};
+use std::path::Path;
 
-pub fn parse_slash_command(input: &str) -> Option<LocalCommand> {
+pub fn process_slash_input(input: &str, cwd: &Path) -> Option<ProcessedInput> {
     let trimmed = input.trim();
     let rest = trimmed.strip_prefix('/')?;
     let mut parts = rest.splitn(2, char::is_whitespace);
-    let command = parts.next()?.trim().to_ascii_lowercase();
+    let command_name = parts.next()?.trim().to_ascii_lowercase();
     let args = parts.next().map(str::trim).unwrap_or_default();
+    let registry = SlashCommandRegistry::load(cwd);
+    let Some(command) = registry.find(&command_name) else {
+        return Some(ProcessedInput::Error(format!(
+            "Unknown slash command: /{}",
+            command_name
+        )));
+    };
 
-    match command.as_str() {
-        "help" => Some(LocalCommand::Help),
-        "clear" => Some(LocalCommand::Clear),
-        "branch" | "fork" => Some(LocalCommand::Branch {
+    match &command.kind {
+        SlashCommandKind::Native => Some(ProcessedInput::LocalCommand(parse_native_command(
+            &command.name,
+            args,
+        ))),
+        SlashCommandKind::Prompt => Some(ProcessedInput::Prompt(format_prompt_command(
+            &command.name,
+            args,
+        ))),
+        SlashCommandKind::FileBacked { template } => Some(ProcessedInput::Prompt(
+            render_markdown_command(template, args, cwd),
+        )),
+    }
+}
+
+pub fn parse_slash_command(input: &str) -> Option<LocalCommand> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    match process_slash_input(input, &cwd) {
+        Some(ProcessedInput::LocalCommand(command)) => Some(command),
+        _ => None,
+    }
+}
+
+fn parse_native_command(command: &str, args: &str) -> LocalCommand {
+    match command {
+        "help" => LocalCommand::Help,
+        "clear" => LocalCommand::Clear,
+        "init" => LocalCommand::Init {
+            force: args.split_whitespace().any(|arg| arg == "--force"),
+            append: args.split_whitespace().any(|arg| arg == "--append"),
+        },
+        "branch" => LocalCommand::Branch {
             message_id: (!args.is_empty()).then(|| args.to_string()),
-        }),
-        "compact" => Some(LocalCommand::Compact {
+        },
+        "compact" => LocalCommand::Compact {
             instructions: (!args.is_empty()).then(|| args.to_string()),
-        }),
-        "permissions" => Some(LocalCommand::Permissions),
-        "model" => Some(LocalCommand::Model {
+        },
+        "permissions" => LocalCommand::Permissions,
+        "model" => LocalCommand::Model {
             model: (!args.is_empty()).then(|| args.to_string()),
-        }),
-        "rewind" => Some(LocalCommand::Rewind {
+        },
+        "rewind" => LocalCommand::Rewind {
             message_id: (!args.is_empty()).then(|| args.to_string()),
             files_only: false,
-        }),
-        "rewind-files" => Some(LocalCommand::Rewind {
+        },
+        "rewind-files" => LocalCommand::Rewind {
             message_id: (!args.is_empty()).then(|| args.to_string()),
             files_only: true,
-        }),
-        "status" => Some(LocalCommand::Status),
-        "resume" => Some(LocalCommand::Resume {
+        },
+        "status" => LocalCommand::Status,
+        "resume" => LocalCommand::Resume {
             session_id: (!args.is_empty()).then(|| args.to_string()),
-        }),
-        _ => None,
+        },
+        _ => LocalCommand::Help,
+    }
+}
+
+fn format_prompt_command(command: &str, args: &str) -> String {
+    match command {
+        "review" => format!(
+            "Review this codebase or change with a code-review mindset. Prioritize correctness, regressions, security risks, and missing tests. Scope: {}",
+            empty_as_default(args, "current workspace or diff")
+        ),
+        "explain" => format!(
+            "Explain the following target clearly and concisely, including important architecture and behavior: {}",
+            empty_as_default(args, "the current context")
+        ),
+        "fix" => format!(
+            "Investigate and fix this issue. Gather evidence before changing code, make the smallest correct change, and verify it: {}",
+            empty_as_default(args, "the current issue")
+        ),
+        "test" => format!(
+            "Create or improve tests for this target. Prefer focused tests that verify behavior and regressions: {}",
+            empty_as_default(args, "the current change")
+        ),
+        _ => args.to_string(),
+    }
+}
+
+fn render_markdown_command(template: &str, args: &str, cwd: &Path) -> String {
+    template
+        .replace("$ARGUMENTS", args)
+        .replace("$CWD", &cwd.display().to_string())
+        .replace(
+            "$RUSTCODE_MD",
+            &cwd.join("rustcode.md").display().to_string(),
+        )
+}
+
+fn empty_as_default<'a>(value: &'a str, default: &'a str) -> &'a str {
+    if value.trim().is_empty() {
+        default
+    } else {
+        value
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_slash_command;
-    use crate::input::LocalCommand;
+    use super::{parse_slash_command, process_slash_input};
+    use crate::input::{LocalCommand, ProcessedInput};
 
     #[test]
     fn parses_basic_slash_commands() {
@@ -58,32 +137,22 @@ mod tests {
     }
 
     #[test]
-    fn parses_resume_and_model_arguments() {
+    fn parses_init_flags() {
         assert_eq!(
-            parse_slash_command("/resume abc123"),
-            Some(LocalCommand::Resume {
-                session_id: Some("abc123".to_string()),
+            parse_slash_command("/init --force"),
+            Some(LocalCommand::Init {
+                force: true,
+                append: false,
             })
         );
-        assert_eq!(
-            parse_slash_command("/model gpt-4o"),
-            Some(LocalCommand::Model {
-                model: Some("gpt-4o".to_string()),
-            })
-        );
-        assert_eq!(
-            parse_slash_command("/rewind-files msg-1"),
-            Some(LocalCommand::Rewind {
-                message_id: Some("msg-1".to_string()),
-                files_only: true,
-            })
-        );
-        assert_eq!(
-            parse_slash_command("/rewind"),
-            Some(LocalCommand::Rewind {
-                message_id: None,
-                files_only: false,
-            })
-        );
+    }
+
+    #[test]
+    fn unknown_slash_command_is_error() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            process_slash_input("/missing", temp.path()),
+            Some(ProcessedInput::Error(_))
+        ));
     }
 }
