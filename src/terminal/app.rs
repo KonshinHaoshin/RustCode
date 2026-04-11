@@ -298,7 +298,8 @@ impl TerminalApp {
             KeyCode::Up if self.state.slash_menu_visible => {
                 let commands = matching_slash_commands(&self.state.input);
                 if !commands.is_empty() {
-                    self.state.slash_menu_selected = self.state.slash_menu_selected.saturating_sub(1);
+                    self.state.slash_menu_selected =
+                        self.state.slash_menu_selected.saturating_sub(1);
                     return true;
                 }
                 false
@@ -2123,8 +2124,11 @@ fn draw_onboarding_view(
 }
 
 fn draw_chat_view(frame: &mut ratatui::Frame<'_>, theme: TerminalTheme, state: &mut TerminalState) {
-    let layout = split_chat_screen(frame.size());
+    let slash_commands = matching_slash_commands(&state.input);
+    let slash_menu_height = slash_menu_height(state, slash_commands.len(), frame.size().height);
+    let layout = split_chat_screen(frame.size(), slash_menu_height);
     render_chat(frame, layout.transcript, theme, state);
+    render_slash_menu(frame, layout.slash_menu, theme, state, &slash_commands);
     render_prompt(frame, layout.prompt, theme, state);
     render_status_line(frame, layout.status, theme, state);
 }
@@ -2938,7 +2942,7 @@ fn render_prompt(
             )),
         ]
     } else {
-        let mut rendered = state
+        state
             .input
             .lines()
             .map(|line| {
@@ -2947,36 +2951,7 @@ fn render_prompt(
                     Style::default().fg(theme.text),
                 ))
             })
-            .collect::<Vec<_>>();
-        if state.slash_menu_visible {
-            let commands = matching_slash_commands(&state.input);
-            if !commands.is_empty() {
-                rendered.push(Line::default());
-                rendered.push(Line::from(Span::styled(
-                    "Slash commands",
-                    Style::default()
-                        .fg(theme.brand)
-                        .add_modifier(Modifier::BOLD),
-                )));
-                for (index, command) in commands.iter().take(MAX_SLASH_MENU_ITEMS).enumerate() {
-                    let selected = index == state.slash_menu_selected;
-                    let prefix = if selected { "> " } else { "  " };
-                    let style = if selected {
-                        Style::default().fg(theme.panel).bg(theme.brand)
-                    } else {
-                        theme.muted_style()
-                    };
-                    rendered.push(Line::from(vec![
-                        Span::styled(format!("{}{}", prefix, format_command_label(command)), style),
-                    ]));
-                    rendered.push(Line::from(Span::styled(
-                        format!("    {}", command.description),
-                        if selected { Style::default().fg(theme.text) } else { theme.muted_style() },
-                    )));
-                }
-            }
-        }
-        rendered
+            .collect::<Vec<_>>()
     };
 
     if !state.active_tasks.is_empty() && state.pending_approval.is_none() {
@@ -3027,6 +3002,63 @@ fn render_prompt(
     );
 }
 
+fn render_slash_menu(
+    frame: &mut ratatui::Frame<'_>,
+    area: ratatui::layout::Rect,
+    theme: TerminalTheme,
+    state: &TerminalState,
+    commands: &[SlashCommandSpec],
+) {
+    if area.height == 0 || !state.slash_menu_visible || commands.is_empty() {
+        return;
+    }
+
+    let mut lines = vec![Line::from(Span::styled(
+        "Slash commands",
+        Style::default()
+            .fg(theme.brand)
+            .add_modifier(Modifier::BOLD),
+    ))];
+    for (index, command) in commands.iter().take(MAX_SLASH_MENU_ITEMS).enumerate() {
+        let selected = index == state.slash_menu_selected;
+        let prefix = if selected { "> " } else { "  " };
+        let style = if selected {
+            Style::default().fg(theme.panel).bg(theme.brand)
+        } else {
+            theme.muted_style()
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{}{}", prefix, format_command_label(command)),
+            style,
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("  {}", command.description),
+            if selected {
+                Style::default().fg(theme.text)
+            } else {
+                theme.muted_style()
+            },
+        )));
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(theme.prompt_block().title(" Commands "))
+            .wrap(ratatui::widgets::Wrap { trim: false }),
+        area,
+    );
+}
+
+fn slash_menu_height(state: &TerminalState, command_count: usize, total_height: u16) -> u16 {
+    if !state.slash_menu_visible || command_count == 0 {
+        return 0;
+    }
+    let items = command_count.min(MAX_SLASH_MENU_ITEMS);
+    let desired = 1 + (items as u16 * 2) + 2;
+    let max_allowed = total_height.saturating_sub(10).min(18);
+    desired.min(max_allowed)
+}
+
 fn matching_slash_commands(input: &str) -> Vec<SlashCommandSpec> {
     let trimmed = input.trim_start();
     let Some(rest) = trimmed.strip_prefix('/') else {
@@ -3035,7 +3067,11 @@ fn matching_slash_commands(input: &str) -> Vec<SlashCommandSpec> {
     if rest.contains(char::is_whitespace) && !rest.ends_with(' ') {
         return Vec::new();
     }
-    let query = rest.split_whitespace().next().unwrap_or_default().to_ascii_lowercase();
+    let query = rest
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     SlashCommandRegistry::load(&cwd)
         .all()

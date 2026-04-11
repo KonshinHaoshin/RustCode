@@ -3,6 +3,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ChatScreenLayout {
     pub transcript: Rect,
+    pub slash_menu: Rect,
     pub prompt: Rect,
     pub status: Rect,
 }
@@ -14,11 +15,12 @@ pub(crate) struct OnboardingScreenLayout {
     pub status: Rect,
 }
 
-pub(crate) fn split_chat_screen(area: Rect) -> ChatScreenLayout {
+pub(crate) fn split_chat_screen(area: Rect, slash_menu_height: u16) -> ChatScreenLayout {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(8),
+            Constraint::Length(slash_menu_height),
             Constraint::Length(5),
             Constraint::Length(1),
         ])
@@ -26,8 +28,9 @@ pub(crate) fn split_chat_screen(area: Rect) -> ChatScreenLayout {
 
     ChatScreenLayout {
         transcript: chunks[0],
-        prompt: chunks[1],
-        status: chunks[2],
+        slash_menu: chunks[1],
+        prompt: chunks[2],
+        status: chunks[3],
     }
 }
 
