@@ -1,6 +1,6 @@
 use rustcode::{
     agents_runtime::{AgentTaskStatus, AgentTaskStore},
-    config::Settings,
+    config::{ApiProvider, Settings},
     file_history::FileHistoryStore,
     runtime::{ApprovalAction, PendingApproval, QueryEngine, QueryProgressEvent, RuntimeMessage},
     session::{Message, Session, SessionInfo, SessionManager, SessionStatus},
@@ -132,8 +132,8 @@ enum ApprovalChoice {
 
 impl DesktopState {
     fn load() -> anyhow::Result<Self> {
-        let settings = Settings::load()?;
         let cwd = initial_working_dir();
+        let settings = Settings::load_with_project_overrides(cwd.as_deref())?;
         let session_manager = SessionManager::for_working_dir(cwd.as_deref());
         let (current_session, history, pending_approval) =
             restore_or_create_session(&session_manager, &settings)?;
@@ -199,6 +199,39 @@ fn switch_workspace(guard: &mut GuiState, working_dir: Option<PathBuf>) -> Comma
     guard.history = history;
     guard.pending_approval = pending_approval;
     Ok(())
+}
+
+fn normalize_gui_settings(mut settings: Settings) -> Settings {
+    settings.model = {
+        let trimmed = settings.model.trim();
+        if trimmed.is_empty() {
+            settings.api.default_model().to_string()
+        } else {
+            trimmed.to_string()
+        }
+    };
+    settings.api.api_key = settings.api.get_api_key();
+    settings.api.base_url = settings.api.get_base_url();
+
+    if settings.api.provider != ApiProvider::Custom {
+        settings.api.protocol = settings.api.provider.default_protocol();
+        settings.api.custom_provider_name = None;
+    } else {
+        settings.api.custom_provider_name = settings
+            .api
+            .custom_provider_name
+            .clone()
+            .filter(|value| !value.trim().is_empty());
+    }
+
+    settings
+}
+
+fn reload_settings_and_runtime(guard: &mut GuiState) -> CommandResult<()> {
+    let working_dir = guard.working_dir.clone();
+    guard.settings = Settings::load_with_project_overrides(working_dir.as_deref())
+        .map_err(|error| error.to_string())?;
+    switch_workspace(guard, working_dir)
 }
 
 fn restore_or_create_session(
@@ -398,10 +431,11 @@ async fn save_settings(
     state: State<'_, DesktopState>,
     settings: Settings,
 ) -> CommandResult<Settings> {
+    let settings = normalize_gui_settings(settings);
     settings.save().map_err(|error| error.to_string())?;
     let mut guard = state.inner.lock().await;
-    guard.settings = settings.clone();
-    Ok(settings)
+    reload_settings_and_runtime(&mut guard)?;
+    Ok(guard.settings.clone())
 }
 
 #[tauri::command]
@@ -988,7 +1022,7 @@ fn read_dir_recursive(path: &std::path::Path) -> Vec<FileNode> {
             let meta = entry.metadata().ok();
             let is_dir = meta.map(|m| m.is_dir()).unwrap_or(false);
             let name = entry.file_name().to_string_lossy().to_string();
-            
+
             // Skip hidden files and common ignore patterns
             if name.starts_with('.') || name == "target" || name == "node_modules" {
                 continue;
@@ -1028,6 +1062,68 @@ async fn get_file_tree(state: State<'_, DesktopState>) -> CommandResult<Vec<File
     Ok(read_dir_recursive(path))
 }
 
+#[tauri::command]
+async fn list_profiles() -> CommandResult<Vec<String>> {
+    rustcode::config::list_profiles().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_active_profile() -> CommandResult<String> {
+    rustcode::config::active_profile_name().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn switch_profile(
+    state: State<'_, DesktopState>,
+    name: String,
+) -> CommandResult<BootstrapPayload> {
+    rustcode::config::set_active_profile(&name).map_err(|e| e.to_string())?;
+    let mut guard = state.inner.lock().await;
+    reload_settings_and_runtime(&mut guard)?;
+    build_bootstrap_payload(&guard)
+}
+
+#[tauri::command]
+async fn create_profile(
+    state: State<'_, DesktopState>,
+    name: String,
+) -> CommandResult<BootstrapPayload> {
+    rustcode::config::set_active_profile(&name).map_err(|e| e.to_string())?;
+    let mut guard = state.inner.lock().await;
+    reload_settings_and_runtime(&mut guard)?;
+    build_bootstrap_payload(&guard)
+}
+
+#[tauri::command]
+async fn load_profile_settings(name: String) -> CommandResult<rustcode::config::Settings> {
+    let path = rustcode::config::profile_settings_path(&name);
+    if !path.exists() {
+        return Err(format!("Profile {} not found", name));
+    }
+    let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let settings = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    Ok(normalize_gui_settings(settings))
+}
+
+#[tauri::command]
+async fn save_profile_settings(
+    state: State<'_, DesktopState>,
+    name: String,
+    settings: rustcode::config::Settings,
+) -> CommandResult<BootstrapPayload> {
+    let settings = normalize_gui_settings(settings);
+    let path = rustcode::config::profile_settings_path(&name);
+    settings.save_to_path(&path).map_err(|e| e.to_string())?;
+
+    // If we are saving the currently active profile, update the in-memory state too
+    let active_name = rustcode::config::active_profile_name().unwrap_or_default();
+    let mut guard = state.inner.lock().await;
+    if name == active_name {
+        reload_settings_and_runtime(&mut guard)?;
+    }
+    build_bootstrap_payload(&guard)
+}
+
 pub fn run() {
     tauri::Builder::default()
         .manage(DesktopState::load().expect("failed to initialize desktop state"))
@@ -1050,6 +1146,12 @@ pub fn run() {
             submit_prompt,
             respond_to_approval,
             get_file_tree,
+            list_profiles,
+            get_active_profile,
+            switch_profile,
+            create_profile,
+            load_profile_settings,
+            save_profile_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -386,16 +386,21 @@ impl Settings {
         Ok(settings)
     }
 
-    /// Load settings from file with project-local overrides.
-    pub fn load() -> anyhow::Result<Self> {
+    /// Load settings and merge project-local overrides for the provided working directory.
+    pub fn load_with_project_overrides(cwd: Option<&Path>) -> anyhow::Result<Self> {
         let mut settings = Self::load_global()?;
-        if let Some(local_settings) = load_project_local_settings(None)? {
+        if let Some(local_settings) = load_project_local_settings(cwd)? {
             settings.permissions =
                 merge_permissions(&settings.permissions, local_settings.permissions.as_ref());
             settings.session = merge_session(&settings.session, local_settings.session.as_ref());
         }
 
         Ok(settings)
+    }
+
+    /// Load settings from file with project-local overrides.
+    pub fn load() -> anyhow::Result<Self> {
+        Self::load_with_project_overrides(None)
     }
 
     /// Save settings to file

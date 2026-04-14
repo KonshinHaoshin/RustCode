@@ -7,6 +7,7 @@ export type FileNode = {
 
 export type Settings = {
   model: string;
+  verbose: boolean;
   onboarding: {
     has_completed_onboarding: boolean;
     last_onboarding_version: string;
@@ -17,6 +18,32 @@ export type Settings = {
     api_key: string | null;
     base_url: string;
     streaming: boolean;
+    max_tokens: number;
+    timeout: number;
+  };
+  memory: {
+    enabled: boolean;
+    path: string;
+    consolidation_interval: number;
+    max_memories: number;
+  };
+  voice: {
+    enabled: boolean;
+    push_to_talk: boolean;
+    silence_threshold: number;
+    sample_rate: number;
+  };
+  compact: {
+    enabled: boolean;
+    auto_compact: boolean;
+    max_tokens_before_compact: number;
+  };
+  permissions: {
+    mode: 'allow_all' | 'ask' | 'deny_all';
+  };
+  session: {
+    auto_restore_last_session: boolean;
+    persist_transcript: boolean;
   };
 };
 
@@ -26,68 +53,36 @@ export type SessionSummary = {
   status: string;
   sessionKind: string;
   updatedAt: string;
-  messageCount: number;
+  message_count: number; // 对齐后端 DTO
 };
 
 export type TranscriptMessage = {
   id: string;
   role: string;
   content: string;
-  entryType: string;
-  parentId: string | null;
+  entry_type: string;
+  parent_id: string | null;
   timestamp: string;
-};
-
-export type TurnTarget = {
-  messageId: string;
-  shortId: string;
-  contentPreview: string;
-  timestamp: string;
-  hasTrackedFiles: boolean;
-};
-
-export type RewindPreview = {
-  messageId: string;
-  restoredInput: string;
-  modifiedFiles: string[];
-  deletedFiles: string[];
-  warnings: string[];
-};
-
-export type TaskSummary = {
-  id: string;
-  title: string;
-  status: string;
-  agentName: string;
-  updatedAt: string;
-  summary: string;
-};
-
-export type PendingApproval = {
-  toolCallId: string;
-  toolName: string;
-  reason: string;
-  arguments: unknown;
 };
 
 export type BootstrapPayload = {
   projectName: string;
   projectPath: string;
   settings: Settings;
-  shouldRunOnboarding: boolean;
+  should_run_onboarding: boolean;
   sessions: SessionSummary[];
   currentSession: SessionSummary;
   transcript: TranscriptMessage[];
-  pendingApproval: PendingApproval | null;
+  pending_approval: any | null;
 };
 
-export type RestorePayload = {
+export type SubmitPayload = {
   session: SessionSummary;
   transcript: TranscriptMessage[];
-  pendingApproval: PendingApproval | null;
+  pending_approval: any | null;
 };
 
-export type SubmitPayload = RestorePayload;
+export type RestorePayload = SubmitPayload;
 
 export type StreamPayload = {
   turnId: string;
@@ -95,7 +90,4 @@ export type StreamPayload = {
   delta?: string;
   target?: string;
   error?: string;
-  pendingApproval?: PendingApproval;
-  toolCall?: { id: string; name: string; arguments: unknown };
-  toolResult?: { name: string; content: string; is_error?: boolean };
 };

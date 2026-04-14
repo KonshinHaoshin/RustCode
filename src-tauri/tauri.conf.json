@@ -14,10 +14,10 @@
     "windows": [
       {
         "title": "RustCode",
-        "width": 1280,
-        "height": 860,
-        "minWidth": 960,
-        "minHeight": 680,
+        "width": 1000,
+        "height": 720,
+        "minWidth": 800,
+        "minHeight": 600,
         "resizable": true
       }
     ],
