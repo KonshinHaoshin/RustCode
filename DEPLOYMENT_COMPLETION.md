@@ -18,7 +18,7 @@
 | **CI/CD 管道** | ✅ 完成 | GitHub Actions 自动化测试和发布 |
 | **CLI 安装脚本** | ✅ 完成 | Windows PS1 + Linux/macOS Bash |
 | **Docker 支持** | ✅ 完成 | Dockerfile + docker-compose.yml |
-| **API 配置示例** | ✅ 完成 | .env.example 和配置文档 |
+| **API 配置示例** | ✅ 完成 | onboarding 和配置文档 |
 
 ---
 
@@ -119,7 +119,7 @@ docker-compose run --rm claude-code-rust repl
 8. **SECURITY.md** - 安全政策
 
 ### 配置
-9. **.env.example** - 环境变量配置示例
+9. **配置文档** - onboarding 和 settings.json 使用说明
 
 ---
 
@@ -133,7 +133,7 @@ docker-compose run --rm claude-code-rust repl
 
 ### docker-compose.yml
 - 卷挂载配置持久化
-- 环境变量管理
+- onboarding 首次配置
 - 网络隔离
 - 一键启动
 
@@ -283,7 +283,7 @@ Deletions: 27
 
 ### 对于 Docker 用户
 1. 使用 docker-compose 简化管理
-2. 通过环境变量配置 API
+2. 通过 onboarding 或配置文件配置 API
 3. 挂载卷以持久化配置
 
 ---

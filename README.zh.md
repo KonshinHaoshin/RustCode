@@ -319,19 +319,10 @@ D:\claude-code\target\release\claude-code.exe
 ### 配置 API
 
 ```bash
-# 方式 1: 使用命令行配置（推荐）
+# 使用命令行配置（推荐）
 claude-code config set api_key "your-api-key"
 claude-code config set base_url "https://api.deepseek.com"
 claude-code config set model "deepseek-reasoner"
-
-# 方式 2: 环境变量
-export DEEPSEEK_API_KEY="your-api-key"
-export API_BASE_URL="https://api.deepseek.com"
-
-# 方式 3: 配置文件 (.env)
-# DEEPSEEK_API_KEY=your-api-key
-# API_BASE_URL=https://api.deepseek.com
-# CLAUDE_MODEL=deepseek-reasoner
 ```
 
 ### 使用示例

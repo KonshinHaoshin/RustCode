@@ -18,6 +18,10 @@ Thumbs.db
 *.dll
 *.so
 *.dylib
+gui/node_modules/
+gui/dist/
+src-tauri/rustcode/
+rustcode/
 
 # Test
 /test-project/
@@ -27,5 +31,17 @@ Thumbs.db
 settings.json
 !settings.json.template
 
+# Environment files
+.env
+.env.*
+
 # Logs
 *.log
+
+AGENTS.md
+CLAUDE.md
+.claude/
+plan/
+!plan/
+!plan/*.md
+GEMINI.md

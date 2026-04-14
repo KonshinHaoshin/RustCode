@@ -1,7 +1,7 @@
 //! Chat UI Component - Chat interface for the GUI
 
-use egui::{Color32, RichText, ScrollArea, TextEdit, Ui, Vec2};
 use chrono::{DateTime, Utc};
+use egui::{Color32, RichText, ScrollArea, TextEdit, Ui, Vec2};
 
 /// A chat message
 #[derive(Debug, Clone)]
@@ -56,7 +56,7 @@ impl Default for ChatPanel {
     fn default() -> Self {
         Self {
             messages: vec![ChatMessage::system(
-                "Welcome to Claude Code! How can I help you today?"
+                "Welcome to RustCode. Pick a provider and start coding.",
             )],
             input_text: String::new(),
             is_loading: false,
@@ -69,15 +69,15 @@ impl ChatPanel {
     /// Render the chat panel
     pub fn ui(&mut self, ui: &mut Ui, theme: &super::Theme) {
         let available_height = ui.available_height();
-        
+
         // Chat messages area
         let messages_height = available_height - 80.0;
-        
+
         egui::Frame::none()
             .fill(theme.background_color())
             .show(ui, |ui| {
                 ui.set_min_height(messages_height);
-                
+
                 ScrollArea::vertical()
                     .auto_shrink([false; 2])
                     .stick_to_bottom(self.scroll_to_bottom)
@@ -86,14 +86,16 @@ impl ChatPanel {
                             for message in &self.messages {
                                 self.render_message(ui, message, theme);
                             }
-                            
+
                             if self.is_loading {
                                 ui.horizontal(|ui| {
                                     ui.add_space(16.0);
                                     ui.spinner();
-                                    ui.label(RichText::new("Thinking...")
-                                        .color(theme.muted_text_color())
-                                        .italics());
+                                    ui.label(
+                                        RichText::new("Thinking...")
+                                            .color(theme.muted_text_color())
+                                            .italics(),
+                                    );
                                 });
                             }
                         });
@@ -169,15 +171,17 @@ impl ChatPanel {
                 // Role label
                 let role_text = match message.role {
                     MessageRole::User => "You",
-                    MessageRole::Assistant => "Claude",
+                    MessageRole::Assistant => "RustCode",
                     MessageRole::System => "System",
                 };
-                
+
                 if message.role != MessageRole::User {
-                    ui.label(RichText::new(role_text)
-                        .strong()
-                        .color(theme.primary_color())
-                        .size(12.0));
+                    ui.label(
+                        RichText::new(role_text)
+                            .strong()
+                            .color(theme.primary_color())
+                            .size(12.0),
+                    );
                     ui.add_space(4.0);
                 }
 
@@ -195,9 +199,11 @@ impl ChatPanel {
                 ui.add_space(4.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::BOTTOM), |ui| {
                     let time_str = message.timestamp.format("%H:%M").to_string();
-                    ui.label(RichText::new(time_str)
-                        .color(theme.muted_text_color())
-                        .size(10.0));
+                    ui.label(
+                        RichText::new(time_str)
+                            .color(theme.muted_text_color())
+                            .size(10.0),
+                    );
                 });
             });
 
@@ -225,7 +231,9 @@ impl ChatPanel {
                         .inner_margin(8.0)
                         .rounding(4.0)
                         .show(ui, |ui| {
-                            ui.monospace(RichText::new(&code_buffer).color(Color32::from_rgb(200, 200, 200)));
+                            ui.monospace(
+                                RichText::new(&code_buffer).color(Color32::from_rgb(200, 200, 200)),
+                            );
                         });
                     code_buffer.clear();
                     in_code_block = false;
@@ -250,7 +258,7 @@ impl ChatPanel {
                         ui.label(RichText::new(&line[2..]).color(color));
                     });
                 } else if line.starts_with("**") && line.ends_with("**") {
-                    let content = &line[2..line.len()-2];
+                    let content = &line[2..line.len() - 2];
                     ui.label(RichText::new(content).strong().color(color));
                 } else if !line.is_empty() {
                     ui.label(RichText::new(line).color(color));
@@ -265,7 +273,9 @@ impl ChatPanel {
                 .inner_margin(8.0)
                 .rounding(4.0)
                 .show(ui, |ui| {
-                    ui.monospace(RichText::new(&code_buffer).color(Color32::from_rgb(200, 200, 200)));
+                    ui.monospace(
+                        RichText::new(&code_buffer).color(Color32::from_rgb(200, 200, 200)),
+                    );
                 });
         }
     }
@@ -283,23 +293,29 @@ impl ChatPanel {
 
             // Send button
             ui.add_space(8.0);
-            
+
             let button_enabled = !self.input_text.trim().is_empty() && !self.is_loading;
             let button_text = if self.is_loading { "⏳" } else { "Send" };
-            
-            let button = egui::Button::new(
-                RichText::new(button_text)
-                    .strong()
-                    .color(if button_enabled { Color32::WHITE } else { theme.muted_text_color() })
-            )
-            .fill(if button_enabled { theme.primary_color() } else { theme.surface_color() })
+
+            let button = egui::Button::new(RichText::new(button_text).strong().color(
+                if button_enabled {
+                    Color32::WHITE
+                } else {
+                    theme.muted_text_color()
+                },
+            ))
+            .fill(if button_enabled {
+                theme.primary_color()
+            } else {
+                theme.surface_color()
+            })
             .min_size(Vec2::new(80.0, 40.0))
             .rounding(8.0);
 
             let button_response = ui.add_enabled(button_enabled, button);
 
             // Handle send action
-            let enter_pressed = response.lost_focus() 
+            let enter_pressed = response.lost_focus()
                 && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
 
             if (button_response.clicked() || enter_pressed) && button_enabled {
@@ -323,7 +339,7 @@ impl ChatPanel {
         // In a real implementation, this would trigger an async API call
         // For now, we'll add a placeholder response
         self.messages.push(ChatMessage::assistant(
-            "I'm processing your request. In the full implementation, this would connect to the AI API and stream the response."
+            "I'm processing your request. In the full implementation, RustCode would call the configured provider and stream the response."
         ));
         self.is_loading = false;
     }
@@ -338,7 +354,7 @@ impl ChatPanel {
     pub fn clear_messages(&mut self) {
         self.messages.clear();
         self.messages.push(ChatMessage::system(
-            "Welcome to Claude Code! How can I help you today?"
+            "Welcome to RustCode. Pick a provider and start coding.",
         ));
     }
 

@@ -37,10 +37,7 @@ impl Theme {
                 TextStyle::Heading,
                 FontId::new(24.0, FontFamily::Proportional),
             ),
-            (
-                TextStyle::Body,
-                FontId::new(16.0, FontFamily::Proportional),
-            ),
+            (TextStyle::Body, FontId::new(16.0, FontFamily::Proportional)),
             (
                 TextStyle::Monospace,
                 FontId::new(14.0, FontFamily::Monospace),
@@ -70,9 +67,9 @@ impl Theme {
     /// Get secondary color
     pub fn secondary_color(&self) -> Color32 {
         match self {
-            Theme::Light => Color32::from_rgb(156, 39, 176),
-            Theme::Dark => Color32::from_rgb(206, 147, 216),
-            Theme::System => Color32::from_rgb(206, 147, 216),
+            Theme::Light => Color32::from_rgb(66, 165, 245),
+            Theme::Dark => Color32::from_rgb(144, 202, 249),
+            Theme::System => Color32::from_rgb(144, 202, 249),
         }
     }
 

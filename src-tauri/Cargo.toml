@@ -1,0 +1,21 @@
+[package]
+name = "rustcode-tauri"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "rustcode_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tauri = { version = "2", features = [] }
+tokio = { version = "1.37", features = ["sync"] }
+uuid = { version = "1.8", features = ["v4", "serde"] }
+rfd = "0.14"
+rustcode = { path = "..", default-features = false, features = ["i18n"] }
