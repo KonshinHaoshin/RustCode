@@ -25,7 +25,11 @@ pub struct SessionRestoreState {
     pub status_message: String,
     pub restore_notice: Option<String>,
     pub lineage_summary: Option<String>,
+    pub plan_mode: bool,
+    pub active_plan: Option<SessionPlan>,
 }
+
+pub type SessionPlan = String;
 
 /// Session manager
 pub struct SessionManager {
@@ -147,6 +151,8 @@ impl SessionManager {
             session_kind: SessionKind::Primary,
             status: SessionStatus::Active,
             pending_approval: None,
+            plan_mode: false,
+            active_plan: None,
             messages: Vec::new(),
         };
         self.save(&session)?;
@@ -184,6 +190,8 @@ impl SessionManager {
             session_kind: SessionKind::ChildAgent,
             status: SessionStatus::Active,
             pending_approval: None,
+            plan_mode: false,
+            active_plan: None,
             messages: vec![Message {
                 id: uuid::Uuid::new_v4().to_string(),
                 role: "system".to_string(),
@@ -248,6 +256,8 @@ impl SessionManager {
             session_kind: SessionKind::Forked,
             status: SessionStatus::Completed,
             pending_approval: None,
+            plan_mode: false,
+            active_plan: None,
             messages,
         };
         self.save(&session)?;
@@ -396,6 +406,8 @@ pub struct Session {
     pub session_kind: SessionKind,
     pub status: SessionStatus,
     pub pending_approval: Option<StoredPendingApproval>,
+    pub plan_mode: bool,
+    pub active_plan: Option<SessionPlan>,
     pub messages: Vec<Message>,
 }
 
@@ -415,6 +427,8 @@ impl Default for Session {
             session_kind: SessionKind::Primary,
             status: SessionStatus::Completed,
             pending_approval: None,
+            plan_mode: false,
+            active_plan: None,
             messages: Vec::new(),
         }
     }
@@ -451,6 +465,8 @@ impl Session {
             status_message,
             restore_notice,
             lineage_summary,
+            plan_mode: self.plan_mode,
+            active_plan: self.active_plan.clone(),
         }
     }
 

@@ -9,6 +9,18 @@ pub fn builtin_command_specs() -> Vec<SlashCommandSpec> {
             None,
             &[],
         ),
+        native(
+            "diff",
+            "Show the current workspace diff",
+            Some("[full]"),
+            &[],
+        ),
+        native(
+            "doctor",
+            "Diagnose and verify your RustCode installation and settings",
+            None,
+            &[],
+        ),
         prompt(
             "init",
             "Analyze this codebase and create or update .rustcode/rustcode.md",
@@ -26,11 +38,29 @@ pub fn builtin_command_specs() -> Vec<SlashCommandSpec> {
             Some("[text]"),
             &[],
         ),
+        native(
+            "mcp",
+            "Manage MCP servers",
+            Some("[list|add|remove|restart|start|stop ...]"),
+            &[],
+        ),
         native("permissions", "Inspect permission rules", None, &[]),
         native(
             "model",
             "Show or change the active model for this session",
             Some("[name]"),
+            &[],
+        ),
+        native(
+            "plan",
+            "Enable plan mode or view the current session plan",
+            Some("[open|<description>]"),
+            &[],
+        ),
+        native(
+            "plugin",
+            "Manage RustCode plugins",
+            Some("[list|search|install|remove|enable|disable|update ...]"),
             &[],
         ),
         native(
@@ -46,6 +76,12 @@ pub fn builtin_command_specs() -> Vec<SlashCommandSpec> {
             &[],
         ),
         native("status", "Show current runtime status", None, &[]),
+        native(
+            "skills",
+            "List available local skills",
+            Some("[list|show|path ...]"),
+            &[],
+        ),
         native(
             "resume",
             "Resume the latest or a matching session",

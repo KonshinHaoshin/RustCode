@@ -1,9 +1,12 @@
 pub mod builtin;
 pub mod init;
+pub mod local;
 pub mod markdown;
+pub mod plan;
 pub mod registry;
 pub mod spec;
 
+use crate::session::SessionPlan;
 use crate::{compact::CompactSettings, config::Settings};
 use registry::SlashCommandRegistry;
 use spec::{SlashCommandKind, SlashCommandSource};
@@ -44,9 +47,11 @@ pub fn format_status_text(
     message_count: usize,
     pending_approval: bool,
     usage_total_tokens: Option<usize>,
+    plan_mode: bool,
+    active_plan: Option<&SessionPlan>,
 ) -> String {
     format!(
-        "Provider: {}\nModel: {}\nProtocol: {}\nFallback: {} ({})\nSession: {}\nMessages: {}\nPending approval: {}\nCompact: enabled={} auto={} reactive={} micro={} turns={} tokens={} reserve={} current_tokens={}",
+        "Provider: {}\nModel: {}\nProtocol: {}\nFallback: {} ({})\nSession: {}\nMessages: {}\nPending approval: {}\nPlan mode: {}\nCurrent plan: {}\nCompact: enabled={} auto={} reactive={} micro={} turns={} tokens={} reserve={} current_tokens={}",
         settings.api.provider_label(),
         settings.model,
         settings.api.protocol().as_str(),
@@ -55,6 +60,8 @@ pub fn format_status_text(
         session_id.unwrap_or("none"),
         message_count,
         if pending_approval { "yes" } else { "no" },
+        if plan_mode { "on" } else { "off" },
+        if active_plan.is_some() { "available" } else { "none" },
         settings.compact.enabled,
         settings.compact.auto_compact,
         settings.compact.reactive_compact,

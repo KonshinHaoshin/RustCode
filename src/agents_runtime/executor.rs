@@ -118,6 +118,36 @@ pub async fn run_agent_direct(
         .unwrap_or_default())
 }
 
+pub async fn run_agent_with_parent_history(
+    settings: Settings,
+    project_root: Option<PathBuf>,
+    agent: AgentDefinition,
+    parent_history: &[RuntimeMessage],
+    prompt: String,
+    session_id: Option<String>,
+) -> anyhow::Result<String> {
+    let history = build_direct_history(
+        parent_history,
+        &prompt,
+        &agent,
+        None,
+        project_root.as_deref(),
+    )?;
+    let turn =
+        execute_agent_turns(settings, project_root, &agent, &history, session_id, true).await?;
+
+    if turn.status == TurnStatus::AwaitingApproval {
+        return Err(anyhow::anyhow!(
+            "Agent execution requires interactive approval. Re-run in TUI."
+        ));
+    }
+
+    Ok(turn
+        .assistant_text()
+        .map(str::to_string)
+        .unwrap_or_default())
+}
+
 async fn run_task(
     settings: Settings,
     project_root: Option<PathBuf>,

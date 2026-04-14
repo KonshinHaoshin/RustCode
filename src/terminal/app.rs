@@ -16,7 +16,9 @@ use super::{
     },
 };
 use crate::{
-    agents_runtime::{resume_agent_task_after_approval, AgentTaskStore},
+    agents_runtime::{
+        resume_agent_task_after_approval, run_agent_with_parent_history, AgentTaskStore,
+    },
     compact::is_compact_summary_content,
     compact::CompactService,
     config::{
@@ -27,16 +29,25 @@ use crate::{
     file_history::FileHistoryStore,
     input::commands::{
         init::{run_init, InitMode},
+        local::{
+            run_diff_command, run_doctor_command, run_mcp_command, run_plugin_command,
+            run_skills_command,
+        },
+        plan::{plan_help_text, render_session_plan},
         registry::SlashCommandRegistry,
         spec::SlashCommandSpec,
     },
-    input::{format_help_text, format_status_text, InputProcessor, LocalCommand, ProcessedInput},
+    input::{
+        format_help_text, format_status_text, InputProcessor, LocalCommand, PlanSlashAction,
+        ProcessedInput,
+    },
     onboarding::OnboardingDraft,
     permissions::events::{PermissionEvent, PermissionEventStore},
     runtime::{
         ApprovalAction, QueryEngine, QueryProgressEvent, QueryTurnResult, RuntimeMessage,
         TurnStatus,
     },
+    services::AgentsService,
     session::{SessionInfo, SessionKind, SessionQuery},
 };
 use crossterm::{
@@ -63,6 +74,7 @@ use std::{
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const MAX_SLASH_MENU_ITEMS: usize = 8;
 
@@ -292,6 +304,11 @@ impl TerminalApp {
         }
     }
 
+    fn current_slash_menu_window_size(&self, command_count: usize) -> usize {
+        let total_height = self.terminal.size().map(|rect| rect.height).unwrap_or(24);
+        slash_menu_window_size(total_height, command_count)
+    }
+
     fn handle_chat_key(&mut self, key: KeyEvent) -> bool {
         if self.state.resume_picker.is_some() {
             return self.handle_resume_picker_key(key);
@@ -312,19 +329,29 @@ impl TerminalApp {
         match key.code {
             KeyCode::Up if self.state.slash_menu_visible => {
                 let commands = matching_slash_commands(&self.state.input);
+                let window_size = self.current_slash_menu_window_size(commands.len());
                 if !commands.is_empty() {
+                    self.state
+                        .clamp_slash_menu_selection(commands.len(), window_size);
                     self.state.slash_menu_selected =
                         self.state.slash_menu_selected.saturating_sub(1);
+                    self.state
+                        .clamp_slash_menu_selection(commands.len(), window_size);
                     return true;
                 }
                 false
             }
             KeyCode::Down if self.state.slash_menu_visible => {
                 let commands = matching_slash_commands(&self.state.input);
-                if !commands.is_empty()
-                    && self.state.slash_menu_selected + 1 < commands.len().min(MAX_SLASH_MENU_ITEMS)
-                {
+                let window_size = self.current_slash_menu_window_size(commands.len());
+                if !commands.is_empty() {
+                    self.state
+                        .clamp_slash_menu_selection(commands.len(), window_size);
+                }
+                if !commands.is_empty() && self.state.slash_menu_selected + 1 < commands.len() {
                     self.state.slash_menu_selected += 1;
+                    self.state
+                        .clamp_slash_menu_selection(commands.len(), window_size);
                     return true;
                 }
                 !commands.is_empty()
@@ -437,6 +464,11 @@ impl TerminalApp {
                 let had_input = !self.state.input.is_empty();
                 self.state.input.pop();
                 self.state.refresh_slash_menu();
+                let commands = matching_slash_commands(&self.state.input);
+                self.state.clamp_slash_menu_selection(
+                    commands.len(),
+                    self.current_slash_menu_window_size(commands.len()),
+                );
                 had_input
             }
             KeyCode::Tab => {
@@ -466,11 +498,17 @@ impl TerminalApp {
                 let had_input = !self.state.input.is_empty();
                 self.state.input.clear();
                 self.state.refresh_slash_menu();
+                self.state.clamp_slash_menu_selection(0, 1);
                 had_input
             }
             KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.state.input.push(ch);
                 self.state.refresh_slash_menu();
+                let commands = matching_slash_commands(&self.state.input);
+                self.state.clamp_slash_menu_selection(
+                    commands.len(),
+                    self.current_slash_menu_window_size(commands.len()),
+                );
                 true
             }
             _ => false,
@@ -1142,22 +1180,36 @@ impl TerminalApp {
         self.state.thinking = true;
         self.state.spinner_tick = 0;
         self.state.last_tick = std::time::Instant::now();
-        self.state.status = format!(
-            "Querying {}/{}",
-            self.state.settings.api.provider_label(),
-            self.state.settings.model
-        );
+        self.state.status = if self.state.plan_mode {
+            "Planning with built-in Plan Agent".to_string()
+        } else {
+            format!(
+                "Querying {}/{}",
+                self.state.settings.api.provider_label(),
+                self.state.settings.model
+            )
+        };
         self.state.mark_chat_render_dirty();
 
         let user_message = RuntimeMessage::user(prompt);
         let base_history = Arc::clone(&self.state.conversation_history);
-        self.state.pending_response = Some(PendingChatRequest {
-            receiver: spawn_chat_request(
+        let receiver = if self.state.plan_mode {
+            spawn_plan_request(
+                self.state.settings.clone(),
+                Arc::clone(&base_history),
+                user_message.content.clone(),
+                self.state.active_session_id.clone(),
+            )
+        } else {
+            spawn_chat_request(
                 self.state.settings.clone(),
                 Arc::clone(&base_history),
                 user_message.clone(),
                 self.state.active_session_id.clone(),
-            ),
+            )
+        };
+        self.state.pending_response = Some(PendingChatRequest {
+            receiver,
             base_history,
             user_message: Some(user_message),
         });
@@ -1176,6 +1228,16 @@ impl TerminalApp {
                 self.state.mark_chat_render_dirty();
                 true
             }
+            LocalCommand::Diff { full } => self.handle_sync_local_text(
+                run_diff_command(Some(&self.state.settings.working_dir), full),
+                "Displayed workspace diff.",
+                "Diff failed.",
+            ),
+            LocalCommand::Doctor => self.handle_sync_local_text(
+                run_doctor_command(&self.state.settings),
+                "Displayed doctor report.",
+                "Doctor failed.",
+            ),
             LocalCommand::Init { force, append } => {
                 let mode = if append {
                     InitMode::Append
@@ -1203,6 +1265,11 @@ impl TerminalApp {
                 None => self.open_message_selector(MessageSelectorMode::Branch),
             },
             LocalCommand::Compact { instructions } => self.compact_current_history(instructions),
+            LocalCommand::Mcp { action } => self.handle_async_local_text(
+                run_mcp_command(&action),
+                "Handled MCP command.",
+                "MCP command failed.",
+            ),
             LocalCommand::Permissions => self.open_permissions_view(),
             LocalCommand::Model { model } => {
                 let detail = if let Some(model) = model {
@@ -1223,6 +1290,12 @@ impl TerminalApp {
                 self.state.status = detail;
                 true
             }
+            LocalCommand::Plan { action } => self.handle_plan_command(action),
+            LocalCommand::Plugin { action } => self.handle_async_local_text(
+                run_plugin_command(&action),
+                "Handled plugin command.",
+                "Plugin command failed.",
+            ),
             LocalCommand::Rewind {
                 message_id,
                 files_only,
@@ -1237,10 +1310,17 @@ impl TerminalApp {
                     self.state.conversation_history.len(),
                     self.state.pending_approval.is_some(),
                     self.state.last_usage_total,
+                    self.state.plan_mode,
+                    self.state.active_plan.as_ref(),
                 ));
                 self.state.status = "Displayed runtime status.".to_string();
                 true
             }
+            LocalCommand::Skills { action } => self.handle_sync_local_text(
+                run_skills_command(&action),
+                "Handled skills command.",
+                "Skills command failed.",
+            ),
             LocalCommand::Resume { session_id } => match session_id {
                 Some(session_id) => self.resume_session_by_query(&session_id),
                 None => self.open_resume_picker(),
@@ -1455,6 +1535,115 @@ impl TerminalApp {
             .messages
             .push(DisplayMessage::transient(DisplayRole::System, content));
         self.state.mark_chat_render_dirty();
+    }
+
+    fn handle_sync_local_text(
+        &mut self,
+        result: anyhow::Result<String>,
+        success_status: &str,
+        error_status: &str,
+    ) -> bool {
+        match result {
+            Ok(message) => {
+                self.push_system_message(message);
+                self.state.status = success_status.to_string();
+            }
+            Err(error) => {
+                self.push_system_message(error.to_string());
+                self.state.status = error_status.to_string();
+            }
+        }
+        true
+    }
+
+    fn handle_async_local_text<F>(
+        &mut self,
+        future: F,
+        success_status: &str,
+        error_status: &str,
+    ) -> bool
+    where
+        F: std::future::Future<Output = anyhow::Result<String>>,
+    {
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                self.push_system_message(format!("Failed to initialize local runtime: {}", error));
+                self.state.status = error_status.to_string();
+                return true;
+            }
+        };
+        self.handle_sync_local_text(runtime.block_on(future), success_status, error_status)
+    }
+
+    fn handle_plan_command(&mut self, action: PlanSlashAction) -> bool {
+        match action {
+            PlanSlashAction::Enter { prompt } => {
+                if self.state.plan_mode {
+                    self.show_active_plan();
+                } else {
+                    self.state.plan_mode = true;
+                    self.push_system_message("Plan mode enabled.".to_string());
+                    self.persist_plan_state("Plan mode enabled.");
+                    if let Some(prompt) = prompt {
+                        self.submit_runtime_prompt(prompt.clone(), prompt);
+                    }
+                }
+                true
+            }
+            PlanSlashAction::Show => {
+                self.show_active_plan();
+                true
+            }
+            PlanSlashAction::Open => {
+                self.push_system_message(
+                    "Opening the current plan in an external editor is not implemented."
+                        .to_string(),
+                );
+                self.state.status = "Plan open is not implemented.".to_string();
+                true
+            }
+            PlanSlashAction::Exit => {
+                self.state.plan_mode = false;
+                self.push_system_message("Plan mode disabled.".to_string());
+                self.persist_plan_state("Plan mode disabled.");
+                true
+            }
+        }
+    }
+
+    fn show_active_plan(&mut self) {
+        let content = match self.state.active_plan.as_ref() {
+            Some(plan) => format!(
+                "Plan mode: {}\n\n{}",
+                if self.state.plan_mode { "on" } else { "off" },
+                render_session_plan(plan)
+            ),
+            None => format!(
+                "Plan mode: {}\n\nNo current session plan.\n\n{}",
+                if self.state.plan_mode { "on" } else { "off" },
+                plan_help_text()
+            ),
+        };
+        self.push_system_message(content);
+        self.state.status = "Displayed current session plan.".to_string();
+    }
+
+    fn persist_plan_state(&mut self, status: &str) {
+        if let Err(error) = self.ensure_active_session() {
+            self.push_system_message(format!("Failed to initialize session: {}", error));
+            self.state.status = "Session initialization failed.".to_string();
+            return;
+        }
+        if let Err(error) = self.state.persist_current_session() {
+            self.push_system_message(format!("Session save failed: {}", error));
+            self.state.status = "Session save failed.".to_string();
+            return;
+        }
+        self.state.status = status.to_string();
     }
 
     fn open_resume_picker(&mut self) -> bool {
@@ -1748,6 +1937,13 @@ impl TerminalApp {
     }
 
     fn apply_turn_result(&mut self, turn: QueryTurnResult) {
+        if self.state.plan_mode {
+            if let Some(text) = turn.assistant_text() {
+                if !text.trim().is_empty() {
+                    self.state.active_plan = Some(text.to_string());
+                }
+            }
+        }
         self.state.last_usage_total = turn.usage.as_ref().map(|usage| usage.total_tokens);
         let should_follow = self.state.chat_auto_follow || self.state.scroll_offset == 0;
         self.state.replace_history(turn.history);
@@ -3055,25 +3251,35 @@ fn render_slash_menu(
             .fg(theme.brand)
             .add_modifier(Modifier::BOLD),
     ))];
-    for (index, command) in commands.iter().take(MAX_SLASH_MENU_ITEMS).enumerate() {
-        let selected = index == state.slash_menu_selected;
+    let visible_count = slash_menu_visible_items_for_area(area.height, commands.len());
+    let start = state
+        .slash_menu_scroll_offset
+        .min(commands.len().saturating_sub(1));
+    for (index, command) in commands.iter().skip(start).take(visible_count).enumerate() {
+        let actual_index = start + index;
+        let selected = actual_index == state.slash_menu_selected;
         let prefix = if selected { "> " } else { "  " };
+        let line = format!(
+            "{}{}  {}",
+            prefix,
+            format_command_label(command),
+            command.description
+        );
         let style = if selected {
             Style::default().fg(theme.panel).bg(theme.brand)
         } else {
-            theme.muted_style()
+            Style::default().fg(theme.text)
         };
         lines.push(Line::from(Span::styled(
-            format!("{}{}", prefix, format_command_label(command)),
+            truncate_to_width(&line, area.width.saturating_sub(2) as usize),
             style,
         )));
+    }
+    if commands.len() > visible_count {
+        let end = (start + visible_count).min(commands.len());
         lines.push(Line::from(Span::styled(
-            format!("  {}", command.description),
-            if selected {
-                Style::default().fg(theme.text)
-            } else {
-                theme.muted_style()
-            },
+            format!("Showing {}-{} of {}", start + 1, end, commands.len()),
+            theme.muted_style(),
         )));
     }
 
@@ -3089,10 +3295,46 @@ fn slash_menu_height(state: &TerminalState, command_count: usize, total_height: 
     if !state.slash_menu_visible || command_count == 0 {
         return 0;
     }
-    let items = command_count.min(MAX_SLASH_MENU_ITEMS);
-    let desired = 1 + (items as u16 * 2) + 2;
+    let items = slash_menu_window_size(total_height, command_count) as u16;
+    let footer = if command_count > items as usize { 1 } else { 0 };
+    1 + items + footer + 2
+}
+
+fn slash_menu_window_size(total_height: u16, command_count: usize) -> usize {
+    if command_count == 0 {
+        return 0;
+    }
     let max_allowed = total_height.saturating_sub(10).min(18);
-    desired.min(max_allowed)
+    let inner_height = max_allowed.saturating_sub(2);
+    let reserved_lines = 2u16;
+    let visible = inner_height.saturating_sub(reserved_lines);
+    visible
+        .max(1)
+        .min(MAX_SLASH_MENU_ITEMS as u16)
+        .min(command_count as u16) as usize
+}
+
+fn slash_menu_visible_items_for_area(area_height: u16, command_count: usize) -> usize {
+    if command_count == 0 || area_height <= 2 {
+        return 0;
+    }
+
+    let inner_height = area_height.saturating_sub(2);
+    let mut visible = inner_height.saturating_sub(1);
+    visible = visible.max(1);
+
+    let mut visible = visible
+        .min(MAX_SLASH_MENU_ITEMS as u16)
+        .min(command_count as u16) as usize;
+    if command_count > visible {
+        let with_footer = inner_height.saturating_sub(2);
+        visible = with_footer
+            .max(1)
+            .min(MAX_SLASH_MENU_ITEMS as u16)
+            .min(command_count as u16) as usize;
+    }
+
+    visible.max(1).min(command_count)
 }
 
 fn matching_slash_commands(input: &str) -> Vec<SlashCommandSpec> {
@@ -3122,6 +3364,31 @@ fn format_command_label(command: &SlashCommandSpec) -> String {
         Some(hint) => format!("/{} {}", command.name, hint),
         None => format!("/{}", command.name),
     }
+}
+
+fn truncate_to_width(text: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if UnicodeWidthStr::width(text) <= max_width {
+        return text.to_string();
+    }
+    if max_width == 1 {
+        return "…".to_string();
+    }
+
+    let mut output = String::new();
+    let mut width = 0usize;
+    for ch in text.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + ch_width + 1 > max_width {
+            break;
+        }
+        output.push(ch);
+        width += ch_width;
+    }
+    output.push('…');
+    output
 }
 
 fn render_approval_buttons(focus_index: usize, theme: TerminalTheme) -> Vec<Span<'static>> {
@@ -3837,6 +4104,59 @@ fn spawn_chat_request(
     receiver
 }
 
+fn spawn_plan_request(
+    settings: Settings,
+    base_history: Arc<Vec<RuntimeMessage>>,
+    prompt: String,
+    session_id: Option<String>,
+) -> mpsc::Receiver<ChatWorkerUpdate> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let plan_prompt = prompt.clone();
+        let payload = (|| -> anyhow::Result<ChatWorkerResult> {
+            let Some(agent) = AgentsService::builtin_definition_by_name("plan") else {
+                return Err(anyhow::anyhow!("Plan agent is not available"));
+            };
+
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            let result = runtime.block_on(run_agent_with_parent_history(
+                settings.clone(),
+                Some(settings.working_dir.clone()),
+                agent,
+                &base_history,
+                plan_prompt.clone(),
+                session_id.clone(),
+            ))?;
+
+            let mut history = (*base_history).clone();
+            history.push(RuntimeMessage::user(plan_prompt));
+            history.push(RuntimeMessage::assistant(result.clone()));
+
+            Ok(ChatWorkerResult {
+                outcome: Ok(ChatWorkerOutcome::Turn(QueryTurnResult {
+                    history,
+                    assistant_message: Some(RuntimeMessage::assistant(result)),
+                    usage: None,
+                    model: "plan".to_string(),
+                    finish_reason: None,
+                    tool_call_count: 0,
+                    status: TurnStatus::Completed,
+                    pending_approval: None,
+                    was_compacted: false,
+                    compaction_summary: None,
+                })),
+            })
+        })()
+        .unwrap_or_else(|error| ChatWorkerResult {
+            outcome: Err(error),
+        });
+        let _ = sender.send(ChatWorkerUpdate::Finished(payload));
+    });
+    receiver
+}
+
 fn spawn_approval_request(
     settings: Settings,
     base_history: Arc<Vec<RuntimeMessage>>,
@@ -4091,5 +4411,18 @@ mod tests {
         assert_eq!(query.kind, Some(SessionKind::Forked));
         assert_eq!(query.text.as_deref(), Some("android build"));
         assert_eq!(query.limit, Some(20));
+    }
+
+    #[test]
+    fn slash_menu_visible_items_uses_actual_area_height() {
+        assert_eq!(slash_menu_visible_items_for_area(18, 21), 8);
+    }
+
+    #[test]
+    fn truncate_to_width_keeps_single_line_with_ellipsis() {
+        assert_eq!(
+            truncate_to_width("/plan [open|<description>] enable plan mode", 20),
+            "/plan [open|<descri…"
+        );
     }
 }

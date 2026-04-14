@@ -1,6 +1,9 @@
 use crate::input::{
     commands::{registry::SlashCommandRegistry, spec::SlashCommandKind},
-    types::{LocalCommand, ProcessedInput},
+    types::{
+        LocalCommand, McpSlashAction, PlanSlashAction, PluginSlashAction, PluginUpdateTarget,
+        ProcessedInput, SkillsSlashAction,
+    },
 };
 use std::path::Path;
 
@@ -45,6 +48,12 @@ fn parse_native_command(command: &str, args: &str) -> LocalCommand {
     match command {
         "help" => LocalCommand::Help,
         "clear" => LocalCommand::Clear,
+        "diff" => LocalCommand::Diff {
+            full: args
+                .split_whitespace()
+                .any(|arg| matches!(arg, "full" | "--full")),
+        },
+        "doctor" => LocalCommand::Doctor,
         "init" => LocalCommand::Init {
             force: args.split_whitespace().any(|arg| arg == "--force"),
             append: args.split_whitespace().any(|arg| arg == "--append"),
@@ -55,9 +64,18 @@ fn parse_native_command(command: &str, args: &str) -> LocalCommand {
         "compact" => LocalCommand::Compact {
             instructions: (!args.is_empty()).then(|| args.to_string()),
         },
+        "mcp" => LocalCommand::Mcp {
+            action: parse_mcp_action(args),
+        },
         "permissions" => LocalCommand::Permissions,
         "model" => LocalCommand::Model {
             model: (!args.is_empty()).then(|| args.to_string()),
+        },
+        "plan" => LocalCommand::Plan {
+            action: parse_plan_action(args),
+        },
+        "plugin" => LocalCommand::Plugin {
+            action: parse_plugin_action(args),
         },
         "rewind" => LocalCommand::Rewind {
             message_id: (!args.is_empty()).then(|| args.to_string()),
@@ -68,10 +86,107 @@ fn parse_native_command(command: &str, args: &str) -> LocalCommand {
             files_only: true,
         },
         "status" => LocalCommand::Status,
+        "skills" => LocalCommand::Skills {
+            action: parse_skills_action(args),
+        },
         "resume" => LocalCommand::Resume {
             session_id: (!args.is_empty()).then(|| args.to_string()),
         },
         _ => LocalCommand::Help,
+    }
+}
+
+fn parse_mcp_action(args: &str) -> McpSlashAction {
+    let tokens = args.split_whitespace().collect::<Vec<_>>();
+    let Some(subcommand) = tokens.first().map(|value| value.to_ascii_lowercase()) else {
+        return McpSlashAction::Help;
+    };
+
+    match subcommand.as_str() {
+        "list" => McpSlashAction::List,
+        "add" if tokens.len() >= 3 => McpSlashAction::Add {
+            name: tokens[1].to_string(),
+            command: tokens[2].to_string(),
+            args: tokens[3..]
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect(),
+        },
+        "remove" if tokens.len() >= 2 => McpSlashAction::Remove {
+            name: tokens[1].to_string(),
+        },
+        "restart" if tokens.len() >= 2 => McpSlashAction::Restart {
+            name: tokens[1].to_string(),
+        },
+        "start" if tokens.len() >= 2 => McpSlashAction::Start {
+            name: tokens[1].to_string(),
+        },
+        "stop" if tokens.len() >= 2 => McpSlashAction::Stop {
+            name: tokens[1].to_string(),
+        },
+        _ => McpSlashAction::Help,
+    }
+}
+
+fn parse_plugin_action(args: &str) -> PluginSlashAction {
+    let tokens = args.split_whitespace().collect::<Vec<_>>();
+    let Some(subcommand) = tokens.first().map(|value| value.to_ascii_lowercase()) else {
+        return PluginSlashAction::Help;
+    };
+
+    match subcommand.as_str() {
+        "list" => PluginSlashAction::List,
+        "search" if tokens.len() >= 2 => PluginSlashAction::Search {
+            query: tokens[1..].join(" "),
+        },
+        "install" if tokens.len() >= 2 => PluginSlashAction::Install {
+            plugin: tokens[1..].join(" "),
+        },
+        "remove" if tokens.len() >= 2 => PluginSlashAction::Remove {
+            name: tokens[1].to_string(),
+        },
+        "enable" if tokens.len() >= 2 => PluginSlashAction::Enable {
+            name: tokens[1].to_string(),
+        },
+        "disable" if tokens.len() >= 2 => PluginSlashAction::Disable {
+            name: tokens[1].to_string(),
+        },
+        "update" if tokens.len() >= 2 && tokens[1] == "--all" => PluginSlashAction::Update {
+            target: PluginUpdateTarget::All,
+        },
+        "update" if tokens.len() >= 2 => PluginSlashAction::Update {
+            target: PluginUpdateTarget::One(tokens[1].to_string()),
+        },
+        _ => PluginSlashAction::Help,
+    }
+}
+
+fn parse_skills_action(args: &str) -> SkillsSlashAction {
+    let tokens = args.split_whitespace().collect::<Vec<_>>();
+    let Some(subcommand) = tokens.first().map(|value| value.to_ascii_lowercase()) else {
+        return SkillsSlashAction::Help;
+    };
+
+    match subcommand.as_str() {
+        "list" => SkillsSlashAction::List,
+        "show" if tokens.len() >= 2 => SkillsSlashAction::Show {
+            name: tokens[1].to_string(),
+        },
+        "path" => SkillsSlashAction::Path,
+        _ => SkillsSlashAction::Help,
+    }
+}
+
+fn parse_plan_action(args: &str) -> PlanSlashAction {
+    let trimmed = args.trim();
+    match trimmed.to_ascii_lowercase().as_str() {
+        "" => PlanSlashAction::Enter { prompt: None },
+        "show" => PlanSlashAction::Show,
+        "open" => PlanSlashAction::Open,
+        "off" | "exit" => PlanSlashAction::Exit,
+        _ => PlanSlashAction::Enter {
+            prompt: Some(trimmed.to_string()),
+        },
     }
 }
 
@@ -125,12 +240,19 @@ fn empty_as_default<'a>(value: &'a str, default: &'a str) -> &'a str {
 #[cfg(test)]
 mod tests {
     use super::{parse_slash_command, process_slash_input};
-    use crate::input::{LocalCommand, ProcessedInput};
+    use crate::input::{
+        LocalCommand, McpSlashAction, PlanSlashAction, PluginSlashAction, PluginUpdateTarget,
+        ProcessedInput,
+    };
 
     #[test]
     fn parses_basic_slash_commands() {
         assert_eq!(parse_slash_command("/help"), Some(LocalCommand::Help));
         assert_eq!(parse_slash_command("/status"), Some(LocalCommand::Status));
+        assert_eq!(
+            parse_slash_command("/diff full"),
+            Some(LocalCommand::Diff { full: true })
+        );
         assert_eq!(
             parse_slash_command("/branch"),
             Some(LocalCommand::Branch { message_id: None })
@@ -139,6 +261,30 @@ mod tests {
             parse_slash_command("/compact keep risks"),
             Some(LocalCommand::Compact {
                 instructions: Some("keep risks".to_string()),
+            })
+        );
+        assert_eq!(
+            parse_slash_command("/plan"),
+            Some(LocalCommand::Plan {
+                action: PlanSlashAction::Enter { prompt: None },
+            })
+        );
+    }
+
+    #[test]
+    fn parses_mcp_and_plugin_subcommands() {
+        assert_eq!(
+            parse_slash_command("/mcp list"),
+            Some(LocalCommand::Mcp {
+                action: McpSlashAction::List,
+            })
+        );
+        assert_eq!(
+            parse_slash_command("/plugin update --all"),
+            Some(LocalCommand::Plugin {
+                action: PluginSlashAction::Update {
+                    target: PluginUpdateTarget::All,
+                },
             })
         );
     }

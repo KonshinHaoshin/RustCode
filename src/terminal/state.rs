@@ -5,7 +5,9 @@ use crate::{
     onboarding::OnboardingDraft,
     permissions::{events::PermissionEvent, PermissionsSettings},
     runtime::{PendingApproval, QueryProgressEvent, QueryTurnResult, RuntimeMessage, RuntimeRole},
-    session::{Session, SessionInfo, SessionManager, SessionStatus, TranscriptEntryType},
+    session::{
+        Session, SessionInfo, SessionManager, SessionPlan, SessionStatus, TranscriptEntryType,
+    },
     terminal::theme::SPINNER_FRAMES,
 };
 use ratatui::{layout::Rect, text::Line, widgets::Paragraph};
@@ -279,6 +281,8 @@ pub struct TerminalState {
     pub session_manager: SessionManager,
     pub active_session: Option<Session>,
     pub active_session_id: Option<String>,
+    pub plan_mode: bool,
+    pub active_plan: Option<SessionPlan>,
     pub last_usage_total: Option<usize>,
     pub live_assistant_message: Option<usize>,
     pub live_thinking_message: Option<usize>,
@@ -288,6 +292,7 @@ pub struct TerminalState {
     pub selection_copied_at: Option<Instant>,
     pub slash_menu_visible: bool,
     pub slash_menu_selected: usize,
+    pub slash_menu_scroll_offset: usize,
     pub pasted_chunks: Vec<PastedChunk>,
     pub next_paste_id: usize,
 }
@@ -317,6 +322,8 @@ impl TerminalState {
         let mut conversation_history = Arc::new(Vec::new());
         let mut messages = Vec::new();
         let mut pending_approval = None;
+        let mut plan_mode = false;
+        let mut active_plan = None;
 
         if view == ViewMode::Chat
             && settings.session.persist_transcript
@@ -342,6 +349,8 @@ impl TerminalState {
                             });
                     restored_session_notice = Some(restored.status_message);
                     active_session_id = Some(session.id.clone());
+                    plan_mode = restored.plan_mode;
+                    active_plan = restored.active_plan;
                     active_session = Some(session);
                 }
                 Ok(None) => {}
@@ -406,6 +415,8 @@ impl TerminalState {
             session_manager,
             active_session,
             active_session_id,
+            plan_mode,
+            active_plan,
             last_usage_total: None,
             live_assistant_message: None,
             live_thinking_message: None,
@@ -415,6 +426,7 @@ impl TerminalState {
             selection_copied_at: None,
             slash_menu_visible: false,
             slash_menu_selected: 0,
+            slash_menu_scroll_offset: 0,
             pasted_chunks: Vec::new(),
             next_paste_id: 1,
         }
@@ -425,6 +437,7 @@ impl TerminalState {
         if !trimmed.starts_with('/') || trimmed.contains('\n') {
             self.slash_menu_visible = false;
             self.slash_menu_selected = 0;
+            self.slash_menu_scroll_offset = 0;
             return;
         }
         self.slash_menu_visible = true;
@@ -440,7 +453,29 @@ impl TerminalState {
         self.input = format!("/{} ", commands[index].name);
         self.slash_menu_visible = false;
         self.slash_menu_selected = 0;
+        self.slash_menu_scroll_offset = 0;
         true
+    }
+
+    pub fn clamp_slash_menu_selection(&mut self, command_count: usize, window_size: usize) {
+        if command_count == 0 {
+            self.slash_menu_selected = 0;
+            self.slash_menu_scroll_offset = 0;
+            return;
+        }
+
+        self.slash_menu_selected = self
+            .slash_menu_selected
+            .min(command_count.saturating_sub(1));
+        if self.slash_menu_selected < self.slash_menu_scroll_offset {
+            self.slash_menu_scroll_offset = self.slash_menu_selected;
+        }
+        let max_visible = window_size.max(1);
+        if self.slash_menu_selected >= self.slash_menu_scroll_offset + max_visible {
+            self.slash_menu_scroll_offset = self.slash_menu_selected + 1 - max_visible;
+        }
+        let max_offset = command_count.saturating_sub(max_visible);
+        self.slash_menu_scroll_offset = self.slash_menu_scroll_offset.min(max_offset);
     }
 
     pub fn register_paste(&mut self, content: String) -> String {
@@ -648,6 +683,8 @@ impl TerminalState {
         self.permissions_view = None;
         self.active_session = None;
         self.active_session_id = None;
+        self.plan_mode = false;
+        self.active_plan = None;
         self.last_usage_total = None;
         self.transcript_mode = TranscriptViewMode::Main;
         self.verbose_transcript = false;
@@ -706,6 +743,8 @@ impl TerminalState {
                     PendingApprovalOrigin::ChildTask { .. } => None,
                 });
         if let Some(session) = &mut self.active_session {
+            session.plan_mode = self.plan_mode;
+            session.active_plan = self.active_plan.clone();
             self.session_manager.save_runtime_state(
                 session,
                 &self.conversation_history,
@@ -736,6 +775,8 @@ impl TerminalState {
             });
         self.active_session_id = Some(session.id.clone());
         self.status = restored.status_message;
+        self.plan_mode = restored.plan_mode;
+        self.active_plan = restored.active_plan;
         self.active_session = Some(session);
         self.resume_picker = None;
         self.message_selector = None;
@@ -1174,5 +1215,14 @@ mod tests {
         let summary = approval_tool_summary(&pending);
         assert!(summary.starts_with("execute_command:"));
         assert!(summary.contains("command"));
+    }
+
+    #[test]
+    fn slash_menu_selection_scrolls_into_view() {
+        let mut state = TerminalState::new(Settings::default(), None);
+        state.slash_menu_selected = 9;
+        state.clamp_slash_menu_selection(12, 8);
+
+        assert_eq!(state.slash_menu_scroll_offset, 2);
     }
 }

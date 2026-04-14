@@ -2,8 +2,12 @@
 
 use super::CliArgs;
 use crate::input::commands::init::{run_init, InitMode};
+use crate::input::commands::local::{
+    run_diff_command, run_doctor_command, run_mcp_command, run_plugin_command, run_skills_command,
+};
 use crate::input::{
-    format_help_text, format_status_text, InputProcessor, LocalCommand, ProcessedInput,
+    format_help_text, format_status_text, InputProcessor, LocalCommand, PlanSlashAction,
+    ProcessedInput,
 };
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -149,8 +153,17 @@ impl Cli {
             LocalCommand::Status => {
                 println!(
                     "{}",
-                    format_status_text(&state.settings, None, 0, false, None)
+                    format_status_text(&state.settings, None, 0, false, None, false, None)
                 );
+            }
+            LocalCommand::Diff { full } => {
+                println!(
+                    "{}",
+                    run_diff_command(Some(&state.settings.working_dir), full)?
+                );
+            }
+            LocalCommand::Doctor => {
+                println!("{}", run_doctor_command(&state.settings)?);
             }
             LocalCommand::Init { force, append } => {
                 let mode = if append {
@@ -163,6 +176,9 @@ impl Cli {
                 let cwd = std::env::current_dir()?;
                 let outcome = run_init(&cwd, mode)?;
                 println!("{}", outcome.message);
+            }
+            LocalCommand::Mcp { action } => {
+                println!("{}", run_mcp_command(&action).await?);
             }
             LocalCommand::Model { model } => {
                 if let Some(model) = model {
@@ -179,6 +195,31 @@ impl Cli {
                     );
                 }
             }
+            LocalCommand::Plan { action } => match action {
+                PlanSlashAction::Enter {
+                    prompt: Some(prompt),
+                } => {
+                    let state = Arc::new(RwLock::new(state));
+                    let service = crate::services::AgentsService::new(state);
+                    let session = service
+                        .run_agent(&crate::services::AgentType::Plan, &prompt)
+                        .await?;
+                    if let Some(result) = session.result {
+                        println!("{}", result);
+                    }
+                }
+                PlanSlashAction::Enter { prompt: None }
+                | PlanSlashAction::Show
+                | PlanSlashAction::Open
+                | PlanSlashAction::Exit => {
+                    return Err(anyhow::anyhow!(
+                        "This /plan action requires an interactive TUI or REPL session. For one-shot planning, use `/plan <description>` or `rustcode agent plan \"...\"`."
+                    ));
+                }
+            },
+            LocalCommand::Plugin { action } => {
+                println!("{}", run_plugin_command(&action).await?);
+            }
             LocalCommand::Permissions
             | LocalCommand::Resume { .. }
             | LocalCommand::Branch { .. }
@@ -194,6 +235,9 @@ impl Cli {
                 return Err(anyhow::anyhow!(
                     "Non-interactive query has no persisted conversation to compact."
                 ));
+            }
+            LocalCommand::Skills { action } => {
+                println!("{}", run_skills_command(&action)?);
             }
         }
 
