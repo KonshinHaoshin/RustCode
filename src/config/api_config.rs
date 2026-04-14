@@ -77,6 +77,7 @@ impl ApiProvider {
     pub fn default_protocol(&self) -> ApiProtocol {
         match self {
             Self::Anthropic => ApiProtocol::Anthropic,
+            Self::XAI => ApiProtocol::Responses,
             _ => ApiProtocol::OpenAi,
         }
     }
@@ -93,6 +94,7 @@ impl Default for ApiProvider {
 pub enum ApiProtocol {
     OpenAi,
     Anthropic,
+    Responses,
 }
 
 impl ApiProtocol {
@@ -100,6 +102,7 @@ impl ApiProtocol {
         match value.trim().to_ascii_lowercase().as_str() {
             "openai" | "open_ai" => Some(Self::OpenAi),
             "anthropic" => Some(Self::Anthropic),
+            "responses" | "response" => Some(Self::Responses),
             _ => None,
         }
     }
@@ -108,6 +111,7 @@ impl ApiProtocol {
         match self {
             Self::OpenAi => "openai",
             Self::Anthropic => "anthropic",
+            Self::Responses => "responses",
         }
     }
 
@@ -438,5 +442,10 @@ mod tests {
 
         assert_eq!(fallback.len(), 1);
         assert_eq!(fallback[0].api_key.as_deref(), Some("fallback-key"));
+    }
+
+    #[test]
+    fn xai_defaults_to_responses_protocol() {
+        assert_eq!(ApiProvider::XAI.default_protocol(), ApiProtocol::Responses);
     }
 }

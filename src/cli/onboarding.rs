@@ -6,6 +6,7 @@ use anyhow::Context;
 use std::io::{self, Write};
 
 pub fn run_config_onboarding() -> anyhow::Result<()> {
+    let _ = crossterm::terminal::disable_raw_mode();
     let mut settings = Settings::load()?;
     let mut draft = OnboardingDraft::from_settings(&settings);
 
@@ -212,7 +213,10 @@ fn prompt_protocol(label: &str, default: ApiProtocol) -> anyhow::Result<ApiProto
             return Ok(protocol);
         }
 
-        println!("Invalid protocol: {}. Use openai or anthropic.", input);
+        println!(
+            "Invalid protocol: {}. Use openai, anthropic, or responses.",
+            input
+        );
     }
 }
 
@@ -289,6 +293,10 @@ fn prompt_raw_line(label: &str) -> anyhow::Result<String> {
     io::stdin()
         .read_line(&mut input)
         .context("failed to read user input")?;
+
+    if input.contains('\u{3}') {
+        return Err(anyhow::anyhow!("onboarding cancelled"));
+    }
 
     Ok(input.trim_end_matches(['\r', '\n']).to_string())
 }

@@ -186,7 +186,8 @@ fn build_bootstrap_payload(guard: &GuiState) -> CommandResult<BootstrapPayload> 
 fn switch_workspace(guard: &mut GuiState, working_dir: Option<PathBuf>) -> CommandResult<()> {
     let session_manager = SessionManager::for_working_dir(working_dir.as_deref());
     let (current_session, history, pending_approval) =
-        restore_or_create_session(&session_manager, &guard.settings).map_err(|error| error.to_string())?;
+        restore_or_create_session(&session_manager, &guard.settings)
+            .map_err(|error| error.to_string())?;
 
     if let Some(path) = &working_dir {
         guard.settings.working_dir = path.clone();
@@ -548,7 +549,9 @@ async fn open_project_folder(state: State<'_, DesktopState>) -> CommandResult<()
 }
 
 #[tauri::command]
-async fn choose_working_directory(state: State<'_, DesktopState>) -> CommandResult<Option<BootstrapPayload>> {
+async fn choose_working_directory(
+    state: State<'_, DesktopState>,
+) -> CommandResult<Option<BootstrapPayload>> {
     let selected = rfd::FileDialog::new().pick_folder();
     let Some(path) = selected else {
         return Ok(None);
@@ -574,7 +577,12 @@ async fn list_user_turn_targets(
         let preview = if message.content.trim().is_empty() {
             "(empty)".to_string()
         } else {
-            message.content.replace('\n', " ").chars().take(120).collect()
+            message
+                .content
+                .replace('\n', " ")
+                .chars()
+                .take(120)
+                .collect()
         };
         let has_tracked_files = file_history
             .as_ref()
@@ -605,7 +613,10 @@ async fn preview_rewind(
         .find(|message| message.id == message_id)
         .ok_or_else(|| format!("Message not found: {}", message_id))?;
     if !target.role.eq_ignore_ascii_case("user") {
-        return Err(format!("Rewind requires a user message id, got {}", target.role));
+        return Err(format!(
+            "Rewind requires a user message id, got {}",
+            target.role
+        ));
     }
 
     let mut modified_files = Vec::new();
@@ -661,7 +672,9 @@ async fn rewind_session(
         guard.history = restored.history;
         guard.pending_approval = restored.pending_approval;
     }
-    session_manager.save(&session).map_err(|error| error.to_string())?;
+    session_manager
+        .save(&session)
+        .map_err(|error| error.to_string())?;
     guard.current_session = session.clone();
 
     Ok(RestorePayload {
@@ -699,9 +712,7 @@ async fn branch_session(
 }
 
 #[tauri::command]
-async fn list_active_tasks(
-    state: State<'_, DesktopState>,
-) -> CommandResult<Vec<TaskSummaryDto>> {
+async fn list_active_tasks(state: State<'_, DesktopState>) -> CommandResult<Vec<TaskSummaryDto>> {
     let guard = state.inner.lock().await;
     let store = AgentTaskStore::for_project(guard.working_dir.as_deref())
         .map_err(|error| error.to_string())?;
@@ -961,6 +972,62 @@ async fn respond_to_approval(
     Ok(payload)
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileNode {
+    name: String,
+    path: String,
+    is_dir: bool,
+    children: Option<Vec<FileNode>>,
+}
+
+fn read_dir_recursive(path: &std::path::Path) -> Vec<FileNode> {
+    let mut nodes = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let meta = entry.metadata().ok();
+            let is_dir = meta.map(|m| m.is_dir()).unwrap_or(false);
+            let name = entry.file_name().to_string_lossy().to_string();
+            
+            // Skip hidden files and common ignore patterns
+            if name.starts_with('.') || name == "target" || name == "node_modules" {
+                continue;
+            }
+
+            let entry_path = entry.path().to_string_lossy().to_string();
+            let children = if is_dir {
+                Some(read_dir_recursive(&entry.path()))
+            } else {
+                None
+            };
+
+            nodes.push(FileNode {
+                name,
+                path: entry_path,
+                is_dir,
+                children,
+            });
+        }
+    }
+    nodes.sort_by(|a, b| {
+        if a.is_dir != b.is_dir {
+            b.is_dir.cmp(&a.is_dir)
+        } else {
+            a.name.to_lowercase().cmp(&b.name.to_lowercase())
+        }
+    });
+    nodes
+}
+
+#[tauri::command]
+async fn get_file_tree(state: State<'_, DesktopState>) -> CommandResult<Vec<FileNode>> {
+    let guard = state.inner.lock().await;
+    let Some(path) = &guard.working_dir else {
+        return Ok(Vec::new());
+    };
+    Ok(read_dir_recursive(path))
+}
+
 pub fn run() {
     tauri::Builder::default()
         .manage(DesktopState::load().expect("failed to initialize desktop state"))
@@ -982,6 +1049,7 @@ pub fn run() {
             list_active_tasks,
             submit_prompt,
             respond_to_approval,
+            get_file_tree,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

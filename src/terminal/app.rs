@@ -56,11 +56,12 @@ use ratatui::{
     Terminal,
 };
 use std::{
+    fs,
     io::{stdout, Stdout, Write},
     process::{Command, Stdio},
     sync::{mpsc, Arc},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 const MAX_SLASH_MENU_ITEMS: usize = 8;
@@ -2836,17 +2837,37 @@ fn copy_text_to_clipboard(text: String) -> anyhow::Result<()> {
     }
 
     if cfg!(target_os = "windows") {
-        let mut child = Command::new("clip")
-            .stdin(Stdio::piped())
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let temp_path = std::env::temp_dir().join(format!(
+            "rustcode-clipboard-{}-{}.txt",
+            std::process::id(),
+            timestamp
+        ));
+        fs::write(&temp_path, text.as_bytes())?;
+
+        let status = Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "param([string]$Path) Get-Content -Raw -Encoding UTF8 -LiteralPath $Path | Set-Clipboard",
+                temp_path.to_string_lossy().as_ref(),
+            ])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .spawn()?;
-        if let Some(stdin) = child.stdin.as_mut() {
-            stdin.write_all(text.as_bytes())?;
-        }
-        let status = child.wait()?;
+            .status()?;
+
+        let _ = fs::remove_file(&temp_path);
         if !status.success() {
-            return Err(anyhow::anyhow!("clip exited with status {}", status));
+            return Err(anyhow::anyhow!(
+                "powershell Set-Clipboard exited with status {}",
+                status
+            ));
         }
         return Ok(());
     }
@@ -3721,7 +3742,8 @@ fn edit_optional(target: &mut Option<String>, ch: Option<char>) {
 fn toggle_protocol(protocol: ApiProtocol) -> ApiProtocol {
     match protocol {
         ApiProtocol::OpenAi => ApiProtocol::Anthropic,
-        ApiProtocol::Anthropic => ApiProtocol::OpenAi,
+        ApiProtocol::Anthropic => ApiProtocol::Responses,
+        ApiProtocol::Responses => ApiProtocol::OpenAi,
     }
 }
 

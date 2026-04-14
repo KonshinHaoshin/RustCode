@@ -169,7 +169,45 @@ impl ApiClient {
                     .chat_once_anthropic_streaming(target, messages, active_tools, progress)
                     .await;
             }
+            ApiProtocol::Responses => {
+                return self.chat_once_responses(target, messages, progress).await;
+            }
         }
+    }
+
+    async fn chat_once_responses(
+        &self,
+        target: &ResolvedApiTarget,
+        messages: &[ChatMessage],
+        progress: &mut dyn ProgressSink,
+    ) -> Result<ChatResponse, AttemptFailure> {
+        let response = self
+            .send_responses_request(target, messages)
+            .await
+            .map_err(|error| AttemptFailure {
+                message: error.to_string(),
+                eligible_for_fallback: true,
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(AttemptFailure {
+                message: format!("API error ({}): {}", status, body),
+                eligible_for_fallback: Self::is_fallback_status(status),
+            });
+        }
+
+        let parsed: ResponsesApiResponse =
+            response.json().await.map_err(|error| AttemptFailure {
+                message: format!("failed to parse Responses API response: {}", error),
+                eligible_for_fallback: true,
+            })?;
+        let text = parsed.output_text();
+        if !text.is_empty() {
+            progress.emit(QueryProgressEvent::AssistantText(text.clone()));
+        }
+        Ok(parsed.into_chat_response(target.model.clone()))
     }
 
     async fn chat_once_openai_streaming(
@@ -520,6 +558,7 @@ impl ApiClient {
                 self.send_anthropic_request(target, messages, tools, stream)
                     .await
             }
+            ApiProtocol::Responses => self.send_responses_request(target, messages).await,
         }
         .map_err(|error| AttemptFailure {
             message: error.to_string(),
@@ -609,6 +648,35 @@ impl ApiClient {
 
         if !self.settings.api.beta_headers.is_empty() {
             builder = builder.header("anthropic-beta", self.settings.api.beta_headers.join(","));
+        }
+
+        Ok(builder.json(&request).send().await?)
+    }
+
+    async fn send_responses_request(
+        &self,
+        target: &ResolvedApiTarget,
+        messages: &[ChatMessage],
+    ) -> anyhow::Result<reqwest::Response> {
+        let request = ResponsesApiRequest {
+            model: target.model.clone(),
+            input: messages
+                .iter()
+                .filter(|message| message.role != "tool")
+                .map(ResponsesInputMessage::from_chat_message)
+                .collect(),
+            max_output_tokens: self.settings.api.max_tokens,
+            stream: false,
+        };
+
+        let url = build_api_url(&target.base_url, "/v1/responses");
+        let mut builder = self
+            .http_client
+            .post(url)
+            .header("Content-Type", "application/json");
+
+        if let Some(api_key) = target.api_key.as_deref().filter(|value| !value.is_empty()) {
+            builder = builder.header("Authorization", format!("Bearer {}", api_key));
         }
 
         Ok(builder.json(&request).send().await?)
@@ -708,6 +776,105 @@ struct OpenAiChatRequest {
     tools: Option<Vec<OpenAiToolDefinition>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ResponsesApiRequest {
+    model: String,
+    input: Vec<ResponsesInputMessage>,
+    max_output_tokens: usize,
+    stream: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ResponsesInputMessage {
+    role: String,
+    content: String,
+}
+
+impl ResponsesInputMessage {
+    fn from_chat_message(message: &ChatMessage) -> Self {
+        Self {
+            role: message.role.clone(),
+            content: message.content.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ResponsesApiResponse {
+    id: String,
+    #[serde(default = "responses_object")]
+    object: String,
+    #[serde(default)]
+    created_at: Option<i64>,
+    #[serde(default)]
+    output_text: Option<String>,
+    #[serde(default)]
+    output: Vec<ResponsesOutputItem>,
+    #[serde(default)]
+    usage: Option<ResponsesUsage>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ResponsesOutputItem {
+    #[serde(default)]
+    content: Vec<ResponsesOutputContent>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ResponsesOutputContent {
+    #[serde(default)]
+    text: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ResponsesUsage {
+    #[serde(default)]
+    input_tokens: usize,
+    #[serde(default)]
+    output_tokens: usize,
+    #[serde(default)]
+    total_tokens: Option<usize>,
+}
+
+fn responses_object() -> String {
+    "response".to_string()
+}
+
+impl ResponsesApiResponse {
+    fn output_text(&self) -> String {
+        self.output_text.clone().unwrap_or_else(|| {
+            self.output
+                .iter()
+                .flat_map(|item| item.content.iter())
+                .filter_map(|block| block.text.clone())
+                .collect::<Vec<_>>()
+                .join("")
+        })
+    }
+
+    fn into_chat_response(self, model: String) -> ChatResponse {
+        let text = self.output_text();
+        ChatResponse {
+            id: self.id,
+            object: self.object,
+            created: self.created_at.unwrap_or_else(|| Utc::now().timestamp()),
+            model,
+            choices: vec![Choice {
+                index: 0,
+                message: ChatMessage::assistant(text),
+                finish_reason: Some("stop".to_string()),
+            }],
+            usage: self.usage.map(|usage| Usage {
+                prompt_tokens: usage.input_tokens,
+                completion_tokens: usage.output_tokens,
+                total_tokens: usage
+                    .total_tokens
+                    .unwrap_or(usage.input_tokens + usage.output_tokens),
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
