@@ -2,6 +2,7 @@ use rustcode::{
     agents_runtime::{AgentTaskStatus, AgentTaskStore},
     config::{ApiProvider, Settings},
     file_history::FileHistoryStore,
+    mcp::{McpManager, McpServerInfo, McpConfig},
     runtime::{ApprovalAction, PendingApproval, QueryEngine, QueryProgressEvent, RuntimeMessage},
     session::{Message, Session, SessionInfo, SessionManager, SessionStatus},
 };
@@ -25,6 +26,7 @@ struct GuiState {
     settings: Settings,
     working_dir: Option<PathBuf>,
     session_manager: SessionManager,
+    mcp_manager: McpManager,
     current_session: Session,
     history: Vec<RuntimeMessage>,
     pending_approval: Option<PendingApproval>,
@@ -57,6 +59,7 @@ struct SubmitPayload {
     session: SessionSummaryDto,
     transcript: Vec<TranscriptMessageDto>,
     pending_approval: Option<PendingApprovalDto>,
+    usage: Option<RuntimeUsageDto>,
 }
 
 #[derive(Debug, Serialize)]
@@ -121,6 +124,14 @@ struct PendingApprovalDto {
     arguments: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeUsageDto {
+    prompt_tokens: usize,
+    completion_tokens: usize,
+    total_tokens: usize,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum ApprovalChoice {
@@ -135,6 +146,7 @@ impl DesktopState {
         let cwd = initial_working_dir();
         let settings = Settings::load_with_project_overrides(cwd.as_deref())?;
         let session_manager = SessionManager::for_working_dir(cwd.as_deref());
+        let mcp_manager = McpManager::new();
         let (current_session, history, pending_approval) =
             restore_or_create_session(&session_manager, &settings)?;
 
@@ -143,6 +155,7 @@ impl DesktopState {
                 settings,
                 working_dir: cwd,
                 session_manager,
+                mcp_manager,
                 current_session,
                 history,
                 pending_approval,
@@ -832,6 +845,7 @@ async fn submit_prompt(
         session_id: session_id.clone(),
     };
 
+    // 确保在异步任务中运行，允许进度事件即时发射
     let result = engine
         .submit_message_with_context_and_progress(
             &history_before,
@@ -866,10 +880,18 @@ async fn submit_prompt(
         )
         .map_err(|error| error.to_string())?;
 
+    let usage_dto = result.usage.map(|u| RuntimeUsageDto {
+        prompt_tokens: u.prompt_tokens,
+        completion_tokens: u.completion_tokens,
+        total_tokens: u.total_tokens,
+    });
+    let tool_call_count = result.tool_call_count;
+
     let payload = SubmitPayload {
         session: session_summary_dto(&session),
         transcript: transcript_from_session(&session),
         pending_approval: pending_approval_dto(pending.as_ref()),
+        usage: usage_dto.clone(),
     };
     let completion_transcript = payload.transcript.clone();
     let completion_pending = payload.pending_approval.clone();
@@ -888,6 +910,8 @@ async fn submit_prompt(
             "sessionId": session_id,
             "transcript": completion_transcript,
             "pendingApproval": completion_pending,
+            "usage": usage_dto,
+            "toolCallCount": tool_call_count,
         }),
     )
     .map_err(|error| error.to_string())?;
@@ -977,10 +1001,18 @@ async fn respond_to_approval(
         )
         .map_err(|error| error.to_string())?;
 
+    let usage_dto = result.usage.map(|u| RuntimeUsageDto {
+        prompt_tokens: u.prompt_tokens,
+        completion_tokens: u.completion_tokens,
+        total_tokens: u.total_tokens,
+    });
+    let tool_call_count = result.tool_call_count;
+
     let payload = SubmitPayload {
         session: session_summary_dto(&session),
         transcript: transcript_from_session(&session),
         pending_approval: pending_approval_dto(pending.as_ref()),
+        usage: usage_dto.clone(),
     };
     let completion_transcript = payload.transcript.clone();
     let completion_pending = payload.pending_approval.clone();
@@ -999,6 +1031,8 @@ async fn respond_to_approval(
             "sessionId": session_id,
             "transcript": completion_transcript,
             "pendingApproval": completion_pending,
+            "usage": usage_dto,
+            "toolCallCount": tool_call_count,
         }),
     )
     .map_err(|error| error.to_string())?;
@@ -1124,6 +1158,154 @@ async fn save_profile_settings(
     build_bootstrap_payload(&guard)
 }
 
+// Session archive and title update commands
+
+#[tauri::command]
+async fn archive_session(
+    state: State<'_, DesktopState>,
+    session_id: String,
+) -> CommandResult<RestorePayload> {
+    let guard = state.inner.lock().await;
+    let session_manager = SessionManager::for_working_dir(guard.working_dir.as_deref());
+    let mut session = session_manager
+        .load(&session_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("Session not found: {}", session_id))?;
+
+    session_manager
+        .mark_status(&mut session, SessionStatus::Completed)
+        .map_err(|error| error.to_string())?;
+    session_manager
+        .save(&session)
+        .map_err(|error| error.to_string())?;
+
+    Ok(RestorePayload {
+        session: session_summary_dto(&session),
+        transcript: transcript_from_session(&session),
+        pending_approval: None,
+    })
+}
+
+#[tauri::command]
+async fn update_session_title(
+    state: State<'_, DesktopState>,
+    session_id: String,
+    new_name: String,
+) -> CommandResult<RestorePayload> {
+    let mut guard = state.inner.lock().await;
+    let session_manager = SessionManager::for_working_dir(guard.working_dir.as_deref());
+    let mut session = session_manager
+        .load(&session_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("Session not found: {}", session_id))?;
+
+    session.name = new_name;
+    session_manager
+        .save(&session)
+        .map_err(|error| error.to_string())?;
+
+    if guard.current_session.id == session_id {
+        guard.current_session = session.clone();
+    }
+
+    Ok(RestorePayload {
+        session: session_summary_dto(&session),
+        transcript: transcript_from_session(&session),
+        pending_approval: pending_approval_dto(guard.pending_approval.as_ref()),
+    })
+}
+
+#[tauri::command]
+async fn list_sessions_with_filter(
+    state: State<'_, DesktopState>,
+    status_filter: Option<String>,
+) -> CommandResult<Vec<SessionSummaryDto>> {
+    let guard = state.inner.lock().await;
+    let sessions = guard
+        .session_manager
+        .list()
+        .map_err(|error| error.to_string())?;
+
+    let filtered: Vec<SessionSummaryDto> = sessions
+        .into_iter()
+        .filter(|s| {
+            if let Some(filter) = &status_filter {
+                let status_str = session_status_label(s.status);
+                filter.to_lowercase().contains(&status_str.to_lowercase())
+            } else {
+                true
+            }
+        })
+        .map(SessionSummaryDto::from)
+        .collect();
+
+    Ok(filtered)
+}
+
+// MCP Server management commands
+
+#[tauri::command]
+async fn list_mcp_servers(state: State<'_, DesktopState>) -> CommandResult<Vec<McpServerInfo>> {
+    let guard = state.inner.lock().await;
+    guard
+        .mcp_manager
+        .list_servers()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn add_mcp_server(
+    state: State<'_, DesktopState>,
+    config: McpConfig,
+) -> CommandResult<()> {
+    let guard = state.inner.lock().await;
+    guard
+        .mcp_manager
+        .add_server(config)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn remove_mcp_server(
+    state: State<'_, DesktopState>,
+    name: String,
+) -> CommandResult<()> {
+    let guard = state.inner.lock().await;
+    guard
+        .mcp_manager
+        .remove_server(&name)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn start_mcp_server(
+    state: State<'_, DesktopState>,
+    name: String,
+) -> CommandResult<()> {
+    let guard = state.inner.lock().await;
+    guard
+        .mcp_manager
+        .start_server(&name)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn stop_mcp_server(
+    state: State<'_, DesktopState>,
+    name: String,
+) -> CommandResult<()> {
+    let guard = state.inner.lock().await;
+    guard
+        .mcp_manager
+        .stop_server(&name)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .manage(DesktopState::load().expect("failed to initialize desktop state"))
@@ -1152,6 +1334,14 @@ pub fn run() {
             create_profile,
             load_profile_settings,
             save_profile_settings,
+            archive_session,
+            update_session_title,
+            list_sessions_with_filter,
+            list_mcp_servers,
+            add_mcp_server,
+            remove_mcp_server,
+            start_mcp_server,
+            stop_mcp_server,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

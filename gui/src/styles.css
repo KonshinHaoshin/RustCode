@@ -51,8 +51,12 @@ body { background: var(--bg-base); color: var(--text-main); font-family: var(--f
 
 /* Markdown Console - Refined */
 .md-p { margin-bottom: 8px; line-height: 1.5; font-size: 13.5px; color: #333; }
-.md-h1 { font-size: 1.4em; font-weight: 800; margin: 12px 0 8px; }
+.md-h1 { font-size: 1.4em; font-weight: 800; margin: 16px 0 8px; }
+.md-h2 { font-size: 1.25em; font-weight: 700; margin: 14px 0 6px; }
+.md-h3 { font-size: 1.1em; font-weight: 700; margin: 12px 0 4px; }
+.md-h4 { font-size: 1em; font-weight: 700; margin: 10px 0 4px; color: var(--text-sub); }
 .md-bold { font-weight: 700; color: #000; }
+
 .terminal-block { background: #0a0a0b; border-radius: 10px; margin: 12px 0; overflow: hidden; border: 1px solid #1a1a1c; box-shadow: 0 10px 30px rgba(0,0,0,0.12); position: relative; }
 .terminal-head { background: #141416; padding: 6px 12px; display: flex; align-items: center; gap: 6px; border-bottom: 1px solid #1a1a1c; }
 .dot { width: 7px; height: 7px; border-radius: 50%; }
@@ -127,9 +131,11 @@ body { background: var(--bg-base); color: var(--text-main); font-family: var(--f
 /* 6. Settings & Profiles - Full Width Optimization */
 .settings-view { 
   width: 100%;
-  max-width: 1000px; /* 大幅放宽限制 */
+  max-width: 1000px; 
   margin: 0; 
-  padding: 32px 40px; 
+  padding: 32px 40px 140px; /* 增加底部 Padding */
+  overflow-y: auto; /* 允许滚动 */
+  height: 100%;
 }
 
 .pro-card { 
@@ -184,3 +190,15 @@ body { background: var(--bg-base); color: var(--text-main); font-family: var(--f
 ::-webkit-scrollbar { width: 4px; }
 ::-webkit-scrollbar-thumb { background: rgba(0, 0, 0, 0.08); border-radius: 10px; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(0, 0, 0, 0.15); }
+
+/* Table Styles */
+.md-table { width: 100%; border-collapse: collapse; margin: 12px 0; border: 1px solid var(--border-soft); font-size: 13px; background: #fff; }
+.md-table th, .md-table td { padding: 10px 14px; border: 1px solid var(--border-soft); text-align: left; }
+.md-table th { background: #f8f9fa; font-weight: 700; color: var(--text-main); }
+.md-table tr:nth-child(even) { background: #fafafa; }
+.md-table tr:hover { background: #f0f4f8; }
+
+/* List Styles */
+.msg-body ul, .msg-body ol { margin: 8px 0 16px 24px; color: #333; }
+.msg-body li { margin-bottom: 4px; line-height: 1.5; font-size: 13.5px; }
+.msg-body li > p { margin: 0; }

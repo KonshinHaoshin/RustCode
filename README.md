@@ -1,173 +1,112 @@
-# RustCode
+# RustCode (v0.1.3)
 
-`RustCode` 是基于 [lorryjovens-hub/claude-code-rust](https://github.com/lorryjovens-hub/claude-code-rust) fork 后继续改造的版本。这个分支不再把自己描述为“原版项目的完整替代”，而是聚焦在几个更实用的增强点：
+**RustCode** is a high-performance, multi-provider AI coding assistant built entirely in Rust. It serves as a native, local-first agent runtime designed for developers who demand speed, flexibility, and professional-grade tooling.
 
-- 主命令统一为 `rustcode`
-- 支持多 provider 选择
-- 支持自定义 provider
-- 自定义 provider 可选 `openai` 或 `anthropic` 协议
-- 支持全局 fallback 链，当前模型失败时自动切换到下一个目标
-- 默认 UI 主题改为蓝色系
+---
 
-## 当前能力
+## 🚀 Core Features
 
-### Provider / Protocol
+### 1. Multi-Provider & Protocol Support
+Native integration with the world's leading AI providers. Switch between them instantly or set up complex fallback chains.
+- **Built-in Presets**: DeepSeek, OpenAI, Anthropic, xAI, Gemini, Dashscope (Aliyun), OpenRouter, Ollama.
+- **Protocols**: OpenAI Chat, Anthropic Messages, and custom xAI-style Responses.
+- **Custom Endpoints**: Full control over Base URL and API keys for any compatible proxy or local LLM.
 
-内置 provider 预设：
+### 2. Intelligent Agentic Runtime
+A sophisticated core (`src/runtime`) that handles:
+- **Multi-turn Loops**: Orchestrates complex reasoning and tool-use sequences.
+- **Tool Integration**: Built-in system tools + **MCP (Model Context Protocol)** support for infinite extensibility.
+- **Plan Mode**: Dedicated `/plan` mode for architectural design before code generation.
+- **Permission Gate**: Fine-grained security controls (Always Allow / Ask / Read-only).
 
-- `deepseek`
-- `openai`
-- `dashscope`
-- `openrouter`
-- `ollama`
-- `custom`
+### 3. Triple-Interface Experience
+- **✨ Pro Liquid GUI**: A stunning, high-density desktop application (Tauri + React).
+  - Claude-inspired "Liquid" aesthetic with glassmorphism effects.
+  - Multi-profile management system (stored in `~/.rustcode/profiles`).
+  - Terminal-style Markdown rendering with macOS-style code blocks.
+  - Smart Slash Command (`/`) popover.
+- **🖥️ Immersive TUI**: A feature-rich Terminal UI (Ratatui).
+  - Keyboard-driven scrolling (PageUp/Down, Home/End).
+  - Resident ASCII mascot for a friendly terminal vibe.
+  - Lightning-fast response and low resource footprint.
+- **📟 Legacy REPL**: Traditional line-based interaction for simple queries.
 
-其中：
+---
 
-- 大多数预设默认走 OpenAI 兼容格式
-- `custom` provider 可以显式选择：
-  - `openai`
-  - `anthropic`
+## 📦 Installation
 
-### Fallback
+### Prerequisites
+- [Rust](https://rustup.rs/) (Edition 2021)
+- [Node.js & pnpm](https://pnpm.io/) (Only for GUI development)
 
-当当前请求失败时，`RustCode` 会按配置的 fallback 链尝试下一个目标。当前实现的触发条件主要包括：
-
-- 网络错误
-- 超时
-- 401 / 403 / 404
-- 409 / 429
-- 5xx
-
-## 安装
-
-### 本地构建
-
+### Build from Source
 ```bash
+# Build the CLI & TUI
 cargo build --release
-```
 
-主二进制输出：
-
-- Linux/macOS: `target/release/rustcode`
-- Windows: `target/release/rustcode.exe`
-
-### 本地安装
-
-```bash
+# Install locally
 cargo install --path .
 ```
 
-安装完成后可直接运行：
-
+### Build Desktop GUI (Tauri)
 ```bash
-rustcode --help
-rustcode --version
+cd gui && pnpm install
+cd ../src-tauri && cargo tauri build
 ```
 
-## 快速开始
+---
 
-首次直接运行 `rustcode` 会自动进入全屏 TUI，并在没有完成配置时自动弹出 onboarding。
+## 🛠️ Configuration
 
+RustCode uses a centralized configuration system located at `~/.rustcode/`.
+
+- **Active Profile**: `~/.rustcode/active-profile`
+- **Profile Details**: `~/.rustcode/profiles/[name].json`
+- **Local Overrides**: `./rustcode/settings.local.json` (Project-specific)
+
+### Quick Start
+Simply run `rustcode` to enter the TUI and start the interactive onboarding flow:
 ```bash
 rustcode
 ```
 
-如果你想手动再次进入交互式配置主模型和 fallback 链，也可以直接运行：
-
+To launch the GUI (once built):
 ```bash
-rustcode config onboard
+# Run from the GUI directory
+cd gui && pnpm tauri:dev
 ```
 
-显式进入全屏 TUI：
+---
 
-```bash
-rustcode tui
-```
+## ⌨️ Slash Commands
 
-### 1. 选择 provider
+| Command | Description |
+| :--- | :--- |
+| `/init` | Initialize project and generate `rustcode.md` |
+| `/plan` | Toggle **Plan Mode** for architectural design |
+| `/model` | Switch or view current AI model |
+| `/clear` | Clear current conversation history |
+| `/fix` | Analyze and fix issues in current code |
+| `/review` | Deeply review code changes |
+| `/status` | View system stats and token usage |
+| `/mcp` | Manage Model Context Protocol servers |
 
-```bash
-rustcode config set provider deepseek
-rustcode config set api_key "your-api-key"
-```
+---
 
-或：
+## 🌐 Internationalization (i18n)
 
-```bash
-rustcode config set provider openai
-rustcode config set api_key "your-openai-key"
-rustcode config set model gpt-4.1-mini
-```
+RustCode is built with global developers in mind.
+- **Supported Languages**: English, 简体中文.
+- **Switching**: Accessible via the **Settings / Voice & UI** tab in the GUI or through the onboarding flow.
 
-### 2. 配置自定义 provider
+---
 
-OpenAI 兼容：
+## ⚖️ License & Credits
 
-```bash
-rustcode config set provider custom
-rustcode config set protocol openai
-rustcode config set custom_provider_name my-gateway
-rustcode config set base_url https://api.example.com
-rustcode config set api_key "your-api-key"
-rustcode config set model custom-model
-```
+- **License**: MIT
+- **Origin**: Proudly forked and enhanced from [lorryjovens-hub/claude-code-rust](https://github.com/lorryjovens-hub/claude-code-rust).
+- **Goal**: To provide the fastest, most customizable Rust-based alternative to mainstream AI coding assistants.
 
-Anthropic 兼容：
+---
 
-```bash
-rustcode config set provider custom
-rustcode config set protocol anthropic
-rustcode config set custom_provider_name my-anthropic-gateway
-rustcode config set base_url https://api.example.com
-rustcode config set api_key "your-api-key"
-rustcode config set model claude-3-5-sonnet-20241022
-```
-
-### 3. 配置 fallback
-
-最简单的链式配置：
-
-```bash
-rustcode config set fallback.enabled true
-rustcode config set fallback.chain "deepseek:deepseek-chat,openai:gpt-4.1-mini"
-```
-
-如果需要更复杂的 custom target，直接写 JSON：
-
-```bash
-rustcode config set fallback.chain "[{\"provider\":\"openai\",\"model\":\"gpt-4.1-mini\"},{\"provider\":\"custom\",\"protocol\":\"anthropic\",\"custom_provider_name\":\"backup-gateway\",\"base_url\":\"https://api.example.com\",\"model\":\"claude-3-5-sonnet-20241022\"}]"
-```
-
-## 使用示例
-
-```bash
-rustcode query --prompt "分析这个仓库的结构"
-rustcode
-rustcode repl
-rustcode config show
-```
-
-其中：
-
-- `rustcode` 默认进入新的全屏 TUI
-- `rustcode repl` 保留为 legacy 行式 REPL
-
-## 配置文件位置
-
-当前配置目录：
-
-- `~/.rustcode/`
-
-如果发现旧版本的 `~/.claude-code/settings.json`，程序会迁移到新目录。
-
-## 说明
-
-这个 fork 的目标是把项目逐步整理成一个更明确的多 provider Rust CLI：
-
-- 命令名统一
-- 配置模型统一
-- 协议层清晰
-- 文档与安装路径一致
-
-上游项目和仓库中的 TS 参考树仍然保留，用于对照和迁移参考。
+*“Code at the speed of thought, powered by the safety of Rust.”*

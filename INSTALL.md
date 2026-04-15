@@ -1,6 +1,15 @@
 # RustCode 安装指南
 
-## 方式一：直接本地安装
+## 方式一：npm 全局安装（仅 TUI）
+
+```bash
+npm install -g rustcode
+```
+
+这条安装链路只安装 TUI，并会下载当前平台的预编译二进制。
+不会打包 GUI / Tauri 桌面版，也不要求本地安装 Rust toolchain。
+
+## 方式二：直接本地安装
 
 ```bash
 cargo install --path .
@@ -12,7 +21,7 @@ cargo install --path .
 rustcode --help
 ```
 
-## 方式二：先构建再手动拷贝
+## 方式三：先构建再手动拷贝
 
 ```bash
 cargo build --release
@@ -23,7 +32,7 @@ cargo build --release
 - Linux/macOS: `target/release/rustcode`
 - Windows: `target/release/rustcode.exe`
 
-## 方式三：使用仓库脚本
+## 方式四：使用仓库脚本
 
 Linux/macOS：
 

@@ -90,4 +90,56 @@ export type StreamPayload = {
   delta?: string;
   target?: string;
   error?: string;
+  toolCall?: ToolCall;
+  toolResult?: ToolResult;
+  pendingApproval?: any;
+};
+
+export type ToolCall = {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+};
+
+export type ToolResult = {
+  tool_call_id: string;
+  name: string;
+  is_error: boolean;
+  content?: string;
+};
+
+export type RuntimeUsage = {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+};
+
+export type McpServerInfo = {
+  name: string;
+  status: string;
+  tools_count: number;
+  resources_count: number;
+  prompts_count: number;
+  started_at: string | null;
+  last_error: string | null;
+};
+
+export type McpConfig = {
+  name: string;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  cwd: string | null;
+  status: string;
+  capabilities: string[];
+  auto_start: boolean;
+};
+
+export type TurnCompletedPayload = {
+  turnId: string;
+  sessionId: string;
+  transcript: TranscriptMessage[];
+  pendingApproval: any | null;
+  usage: RuntimeUsage | null;
+  toolCallCount: number;
 };

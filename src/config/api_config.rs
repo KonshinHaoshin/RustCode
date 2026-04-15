@@ -116,7 +116,7 @@ impl ApiProtocol {
     }
 
     pub fn supports_tool_calling(&self) -> bool {
-        matches!(self, Self::OpenAi | Self::Anthropic)
+        matches!(self, Self::OpenAi | Self::Anthropic | Self::Responses)
     }
 }
 

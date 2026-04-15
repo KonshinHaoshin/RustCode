@@ -292,7 +292,19 @@ chmod +x ./scripts/install-linux.sh
 ./scripts/install-linux.sh --install-dir "/opt/claude-code"
 ```
 
-#### 方式二：手动编译
+#### 方式二：npm 全局安装（仅 TUI）
+
+```bash
+npm install -g rustcode
+```
+
+这条安装链路只发布 TUI：
+
+- 不依赖本地 Rust toolchain
+- 安装时会按当前平台下载预编译 `rustcode` 二进制
+- 不包含 GUI / Tauri 桌面版
+
+#### 方式三：手动编译
 
 ```bash
 # 克隆仓库
@@ -306,7 +318,7 @@ cargo build --release
 ./target/release/claude-code
 ```
 
-#### 方式三：指定编译目录（解决磁盘空间问题）
+#### 方式四：指定编译目录（解决磁盘空间问题）
 
 ```bash
 # 使用D盘作为编译目录
