@@ -198,19 +198,40 @@ impl TerminalApp {
             }
             Event::Mouse(mouse) => {
                 if self.state.view == ViewMode::Chat {
-                    let old_offset = self.state.scroll_offset;
                     match mouse.kind {
                         MouseEventKind::ScrollDown => {
-                            self.state.scroll_offset = self.state.scroll_offset.saturating_sub(3);
-                            if self.state.scroll_offset == 0 {
-                                self.state.chat_auto_follow = true;
+                            if self.state.slash_menu_visible {
+                                let commands = matching_slash_commands(&self.state.input);
+                                let window_size = self.current_slash_menu_window_size(commands.len());
+                                if !commands.is_empty() && self.state.slash_menu_selected + 1 < commands.len() {
+                                    self.state.slash_menu_selected += 1;
+                                    self.state.clamp_slash_menu_selection(commands.len(), window_size);
+                                }
+                            } else {
+                                self.state.scroll_offset = self.state.scroll_offset.saturating_sub(5);
+                                if self.state.scroll_offset == 0 {
+                                    self.state.chat_auto_follow = true;
+                                }
                             }
-                            return Ok(self.state.scroll_offset != old_offset);
+                            return Ok(true);
                         }
                         MouseEventKind::ScrollUp => {
-                            self.state.scroll_offset = self.state.scroll_offset.saturating_add(3);
+                            if self.state.slash_menu_visible {
+                                if self.state.slash_menu_selected > 0 {
+                                    self.state.slash_menu_selected -= 1;
+                                    let commands = matching_slash_commands(&self.state.input);
+                                    let window_size = self.current_slash_menu_window_size(commands.len());
+                                    self.state.clamp_slash_menu_selection(commands.len(), window_size);
+                                }
+                            } else {
+                                self.state.scroll_offset = self.state.scroll_offset.saturating_add(5);
+                                self.state.chat_auto_follow = false;
+                            }
+                            return Ok(true);
+                        }
+                        MouseEventKind::Down(_) | MouseEventKind::Drag(_) => {
+                            // Any click or drag interaction should pause auto-follow to allow focus
                             self.state.chat_auto_follow = false;
-                            return Ok(self.state.scroll_offset != old_offset);
                         }
                         _ => {}
                     }
@@ -327,34 +348,64 @@ impl TerminalApp {
         }
 
         match key.code {
-            KeyCode::Up if self.state.slash_menu_visible => {
-                let commands = matching_slash_commands(&self.state.input);
-                let window_size = self.current_slash_menu_window_size(commands.len());
-                if !commands.is_empty() {
-                    self.state
-                        .clamp_slash_menu_selection(commands.len(), window_size);
-                    self.state.slash_menu_selected =
-                        self.state.slash_menu_selected.saturating_sub(1);
-                    self.state
-                        .clamp_slash_menu_selection(commands.len(), window_size);
-                    return true;
+            KeyCode::Up => {
+                if self.state.slash_menu_visible {
+                    let commands = matching_slash_commands(&self.state.input);
+                    let window_size = self.current_slash_menu_window_size(commands.len());
+                    if !commands.is_empty() {
+                        self.state
+                            .clamp_slash_menu_selection(commands.len(), window_size);
+                        self.state.slash_menu_selected =
+                            self.state.slash_menu_selected.saturating_sub(1);
+                        self.state
+                            .clamp_slash_menu_selection(commands.len(), window_size);
+                        return true;
+                    }
+                    false
+                } else {
+                    let old_offset = self.state.scroll_offset;
+                    self.state.scroll_offset = self.state.scroll_offset.saturating_add(1);
+                    self.state.chat_auto_follow = false;
+                    self.state.scroll_offset != old_offset
                 }
-                false
             }
-            KeyCode::Down if self.state.slash_menu_visible => {
-                let commands = matching_slash_commands(&self.state.input);
-                let window_size = self.current_slash_menu_window_size(commands.len());
-                if !commands.is_empty() {
-                    self.state
-                        .clamp_slash_menu_selection(commands.len(), window_size);
+            KeyCode::Down => {
+                if self.state.slash_menu_visible {
+                    let commands = matching_slash_commands(&self.state.input);
+                    let window_size = self.current_slash_menu_window_size(commands.len());
+                    if !commands.is_empty() {
+                        self.state
+                            .clamp_slash_menu_selection(commands.len(), window_size);
+                    }
+                    if !commands.is_empty() && self.state.slash_menu_selected + 1 < commands.len() {
+                        self.state.slash_menu_selected += 1;
+                        self.state
+                            .clamp_slash_menu_selection(commands.len(), window_size);
+                        return true;
+                    }
+                    !commands.is_empty()
+                } else {
+                    let old_offset = self.state.scroll_offset;
+                    self.state.scroll_offset = self.state.scroll_offset.saturating_sub(1);
+                    if self.state.scroll_offset == 0 {
+                        self.state.chat_auto_follow = true;
+                    }
+                    self.state.scroll_offset != old_offset
                 }
-                if !commands.is_empty() && self.state.slash_menu_selected + 1 < commands.len() {
-                    self.state.slash_menu_selected += 1;
-                    self.state
-                        .clamp_slash_menu_selection(commands.len(), window_size);
-                    return true;
+            }
+            KeyCode::PageUp => {
+                let old_offset = self.state.scroll_offset;
+                self.state.scroll_offset = self.state.scroll_offset.saturating_add(12);
+                self.state.chat_auto_follow = false;
+                self.state.scroll_offset != old_offset
+            }
+            KeyCode::PageDown => {
+                let old_offset = self.state.scroll_offset;
+                self.state.scroll_offset = self.state.scroll_offset.saturating_sub(12);
+                if self.state.scroll_offset == 0 {
+                    self.state.chat_auto_follow = true;
                 }
-                !commands.is_empty()
+                self.state.scroll_offset != old_offset
             }
             KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.state.transcript_mode = match self.state.transcript_mode {
@@ -392,40 +443,13 @@ impl TerminalApp {
                 self.state.mark_chat_render_dirty();
                 true
             }
-            KeyCode::Up if self.state.transcript_mode == TranscriptViewMode::Transcript => {
+            KeyCode::Home => {
                 let old_offset = self.state.scroll_offset;
-                self.state.scroll_offset = self.state.scroll_offset.saturating_add(1);
-                self.state.chat_auto_follow = false;
-                self.state.scroll_offset != old_offset
-            }
-            KeyCode::Down if self.state.transcript_mode == TranscriptViewMode::Transcript => {
-                let old_offset = self.state.scroll_offset;
-                self.state.scroll_offset = self.state.scroll_offset.saturating_sub(1);
-                if self.state.scroll_offset == 0 {
-                    self.state.chat_auto_follow = true;
-                }
-                self.state.scroll_offset != old_offset
-            }
-            KeyCode::PageUp if self.state.transcript_mode == TranscriptViewMode::Transcript => {
-                let old_offset = self.state.scroll_offset;
-                self.state.scroll_offset = self.state.scroll_offset.saturating_add(12);
-                self.state.chat_auto_follow = false;
-                self.state.scroll_offset != old_offset
-            }
-            KeyCode::PageDown if self.state.transcript_mode == TranscriptViewMode::Transcript => {
-                let old_offset = self.state.scroll_offset;
-                self.state.scroll_offset = self.state.scroll_offset.saturating_sub(12);
-                if self.state.scroll_offset == 0 {
-                    self.state.chat_auto_follow = true;
-                }
-                self.state.scroll_offset != old_offset
-            }
-            KeyCode::Home if self.state.transcript_mode == TranscriptViewMode::Transcript => {
                 self.state.scroll_offset = usize::MAX / 4;
                 self.state.chat_auto_follow = false;
-                true
+                self.state.scroll_offset != old_offset
             }
-            KeyCode::End if self.state.transcript_mode == TranscriptViewMode::Transcript => {
+            KeyCode::End => {
                 let changed = self.state.scroll_offset != 0;
                 self.state.scroll_offset = 0;
                 self.state.chat_auto_follow = true;
@@ -2340,9 +2364,31 @@ fn draw_chat_view(frame: &mut ratatui::Frame<'_>, theme: TerminalTheme, state: &
     let slash_menu_height = slash_menu_height(state, slash_commands.len(), frame.size().height);
     let layout = split_chat_screen(frame.size(), slash_menu_height);
     render_chat(frame, layout.transcript, theme, state);
+    render_mascot(frame, layout.mascot, theme);
     render_slash_menu(frame, layout.slash_menu, theme, state, &slash_commands);
     render_prompt(frame, layout.prompt, theme, state);
     render_status_line(frame, layout.status, theme, state);
+}
+
+fn render_mascot(frame: &mut ratatui::Frame<'_>, area: ratatui::layout::Rect, theme: TerminalTheme) {
+    if area.width < 8 || area.height < 5 {
+        return;
+    }
+
+    // 采用更具现代感的品牌字标，对齐 GUI 的 Minimalist 风格
+    let mascot_art = vec![
+        "  ____  ____  ",
+        " |  _ \\/ ___| ",
+        " | |_) \\___ \\ ",
+        " |  _ < ___) |",
+        " |_| \\_\\____/ ",
+    ];
+
+    let paragraph = Paragraph::new(mascot_art.join("\n"))
+        .style(Style::default().fg(theme.brand).add_modifier(Modifier::BOLD))
+        .alignment(Alignment::Center);
+
+    frame.render_widget(paragraph, area);
 }
 
 fn render_onboarding(

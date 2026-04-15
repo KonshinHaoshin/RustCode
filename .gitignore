@@ -20,6 +20,7 @@ Thumbs.db
 *.dylib
 gui/node_modules/
 gui/dist/
+.npm-cache/
 src-tauri/rustcode/
 rustcode/
 

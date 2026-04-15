@@ -662,11 +662,10 @@ impl ApiClient {
             model: target.model.clone(),
             input: messages
                 .iter()
-                .filter(|message| message.role != "tool")
                 .map(ResponsesInputMessage::from_chat_message)
                 .collect(),
             max_output_tokens: self.settings.api.max_tokens,
-            stream: false,
+            stream: self.settings.api.streaming,
         };
 
         let url = build_api_url(&target.base_url, "/v1/responses");
@@ -790,13 +789,21 @@ struct ResponsesApiRequest {
 struct ResponsesInputMessage {
     role: String,
     content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
 }
 
 impl ResponsesInputMessage {
     fn from_chat_message(message: &ChatMessage) -> Self {
+        let role = if message.role == "tool" {
+            "user".to_string()
+        } else {
+            message.role.clone()
+        };
         Self {
-            role: message.role.clone(),
+            role,
             content: message.content.clone(),
+            tool_call_id: message.tool_call_id.clone(),
         }
     }
 }

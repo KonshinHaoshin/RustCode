@@ -1,0 +1,39 @@
+{
+  "name": "rustcode",
+  "version": "0.1.3",
+  "description": "RustCode TUI distributed via npm with prebuilt binaries",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KonshinHaoshin/claude-code-rust.git"
+  },
+  "homepage": "https://github.com/KonshinHaoshin/claude-code-rust#readme",
+  "bugs": {
+    "url": "https://github.com/KonshinHaoshin/claude-code-rust/issues"
+  },
+  "bin": {
+    "rustcode": "bin/rustcode.js"
+  },
+  "files": [
+    "bin/",
+    "vendor/",
+    "README.md",
+    "README.zh.md",
+    "INSTALL.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "pack:check": "npm pack --dry-run"
+  },
+  "keywords": [
+    "tui",
+    "cli",
+    "agent",
+    "ai",
+    "rustcode"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "preferGlobal": true
+}
